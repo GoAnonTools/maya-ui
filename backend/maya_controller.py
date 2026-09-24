@@ -328,6 +328,18 @@ class MayaController(QObject):
     def reset(self):
         self.set_state("idle")
 
+    @Slot()
+    def cancel_active_task(self):
+        """Cancel active LLM worker, TTS, and STT safely, restoring controller to idle."""
+        log.info("Cancelling active task request_active=%s state=%s", self._request_active, self._state)
+        if self._llm_worker is not None:
+            self._llm_worker.cancel()
+        self._tts.stop()
+        self._stt.cancel()
+        self._request_active = False
+        self.set_state("idle")
+
+
     @Slot(str)
     def submit(self, text):
         text = text.strip()
