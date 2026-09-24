@@ -38,6 +38,27 @@ Window {
                 maximumLineCount: 5; elide: Text.ElideRight
             }
             Item { Layout.fillHeight: true }
+            ComboBox {
+                id: modelSelector
+                objectName: "modelSelector"
+                Layout.fillWidth: true
+                textRole: "displayName"
+                valueRole: "id"
+                model: mayaController.availableProviders
+                currentIndex: {
+                    var list = mayaController.availableProviders || []
+                    for (var i = 0; i < list.length; i++) {
+                        if (list[i].id === mayaController.currentProviderName) return i
+                    }
+                    return 0
+                }
+                onActivated: function(index) {
+                    var list = mayaController.availableProviders || []
+                    if (index >= 0 && index < list.length) {
+                        mayaController.select_provider(list[index].id)
+                    }
+                }
+            }
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: "#253f4549" }
             Text { text: "A little space to think."; color: "#89999e"; font.pixelSize: 11 }
         }

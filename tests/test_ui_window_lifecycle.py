@@ -14,6 +14,7 @@ class DummyMayaController(QObject):
     detailChanged = Signal()
     userTextChanged = Signal()
     assistantTextChanged = Signal()
+    providerChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -21,6 +22,11 @@ class DummyMayaController(QObject):
         self._detail = ""
         self._user_text = ""
         self._assistant_text = ""
+        self._provider_name = "newelle"
+        self._provider_display_name = "Newelle Local"
+        self._available_providers = [
+            {"id": "newelle", "displayName": "Newelle Local", "available": True, "reason": None}
+        ]
 
     def _get_state(self):
         return self._state
@@ -34,10 +40,22 @@ class DummyMayaController(QObject):
     def _get_assistant_text(self):
         return self._assistant_text
 
+    def _get_current_provider_name(self):
+        return self._provider_name
+
+    def _get_current_provider_display_name(self):
+        return self._provider_display_name
+
+    def _get_available_providers(self):
+        return self._available_providers
+
     state = Property(str, _get_state, notify=stateChanged)
     detail = Property(str, _get_detail, notify=detailChanged)
     userText = Property(str, _get_user_text, notify=userTextChanged)
     assistantText = Property(str, _get_assistant_text, notify=assistantTextChanged)
+    currentProviderName = Property(str, _get_current_provider_name, notify=providerChanged)
+    currentProviderDisplayName = Property(str, _get_current_provider_display_name, notify=providerChanged)
+    availableProviders = Property(list, _get_available_providers, notify=providerChanged)
 
     @Slot(int)
     def set_demo_state(self, num):
@@ -57,6 +75,10 @@ class DummyMayaController(QObject):
 
     @Slot()
     def stop_ptt(self):
+        pass
+
+    @Slot(str)
+    def select_provider(self, name):
         pass
 
 

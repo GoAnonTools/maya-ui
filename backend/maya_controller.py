@@ -62,8 +62,55 @@ class MayaController(QObject):
     listeningLevelChanged = Signal()
     userTextChanged = Signal()
     assistantTextChanged = Signal()
+    providerChanged = Signal()
     _states = ("idle", "listening", "thinking", "speaking", "tool", "error")
     _details = {"idle": "", "listening": "", "thinking": "", "speaking": "", "tool": "", "error": "Something went wrong"}
+
+    def _get_current_provider_name(self):
+        return self._provider_manager.current_provider_name
+
+    def _get_current_provider_display_name(self):
+        return self._provider_manager.current_provider_display_name
+
+    def _get_available_providers(self):
+        return [
+            {
+                "id": status.name,
+                "displayName": status.display_name or status.name,
+                "available": status.available,
+                "reason": status.reason,
+            }
+            for status in self._provider_manager.registry.statuses()
+        ]
+
+    currentProviderName = Property(str, _get_current_provider_name, notify=providerChanged)
+    currentProviderDisplayName = Property(str, _get_current_provider_display_name, notify=providerChanged)
+    availableProviders = Property(list, _get_available_providers, notify=providerChanged)
+
+    @property
+    def current_provider_name(self) -> str:
+        """Technical ID of the active provider, delegated to ProviderManager."""
+        return self._provider_manager.current_provider_name
+
+    @property
+    def current_provider_display_name(self) -> str:
+        """Friendly active provider label, delegated to ProviderManager."""
+        return self._provider_manager.current_provider_display_name
+
+    @Slot(str)
+    def select_provider(self, name: str) -> None:
+        if not isinstance(name, str):
+            return
+        target = name.strip()
+        if not target or target == self.current_provider_name:
+            return
+        log.info("Switching active LLM provider requested: current=%s target=%s", self.current_provider_name, target)
+        try:
+            self._provider_manager.select(target)
+            self.providerChanged.emit()
+            log.info("LLM provider successfully switched to %s (%s)", self.current_provider_name, self.current_provider_display_name)
+        except Exception as exc:
+            log.error("Failed to switch LLM provider to %r: %s", target, exc)
 
     def __init__(self, memory_service=None, provider_manager: ProviderManager | None = None, mcp_client=None):
         super().__init__()
@@ -83,6 +130,31 @@ class MayaController(QObject):
         self._context_size = self._load_context_size()
         self._memory = memory_service if memory_service is not None else MemoryService.from_config()
         self._pending_recovery_notice = False
+        self._pending_memory_action = None
+        self._wake_timeout_started_at = None
+        self._wake_timeout_timer = QTimer(self)
+        self._wake_timeout_timer.setSingleShot(True)
+        self._wake_timeout_timer.timeout.connect(self._on_wake_timeout)
+        self._provider_manager = provider_manager or create_default_provider_manager(self)
+        self._mcp_client = mcp_client or MCPStdioClient()
+        self._llm_thread = None
+        self._llm_worker = None
+        self._tts = TTSManager(self)
+        self._stt = STTManager(self)
+        self._wake = WakeManager(self)
+        self._tts.started.connect(self._on_speech_started)
+        self._tts.finished.connect(self._on_speech_finished)
+        self._tts.failed.connect(self._on_speech_failed)
+        self._tts.levelChanged.connect(self._on_speech_level)
+        self._stt.started.connect(self._on_stt_started)
+        self._stt.transcribing.connect(self._on_stt_transcribing)
+        self._stt.transcriptReady.connect(self._on_stt_transcript)
+        self._stt.failed.connect(self._on_stt_failed)
+        self._stt.levelChanged.connect(self._on_listening_level)
+        self._wake.detected.connect(self._on_wake_detected, Qt.ConnectionType.QueuedConnection)
+        self._wake.commandReady.connect(self._on_wake_command, Qt.ConnectionType.QueuedConnection)
+        self._wake.failed.connect(self._on_wake_failed, Qt.ConnectionType.QueuedConnection)
+        self._wake.start()
 
     @staticmethod
     def _load_context_size(config_path: Path | None = None) -> int:
@@ -129,34 +201,6 @@ class MayaController(QObject):
             "usage_ratio": round(ratio, 4),
             "is_approaching_limit": ratio >= 0.75,
         }
-        self._pending_memory_action = None
-        self._wake_timeout_started_at = None
-        self._wake_timeout_timer = QTimer(self)
-        self._wake_timeout_timer.setSingleShot(True)
-        self._wake_timeout_timer.timeout.connect(self._on_wake_timeout)
-        self._provider_manager = provider_manager or create_default_provider_manager(self)
-        self._mcp_client = mcp_client or MCPStdioClient()
-        self._llm_thread = None
-        self._llm_worker = None
-        self._tts = TTSManager(self)
-        self._stt = STTManager(self)
-        self._wake = WakeManager(self)
-        self._tts.started.connect(self._on_speech_started)
-        self._tts.finished.connect(self._on_speech_finished)
-        self._tts.failed.connect(self._on_speech_failed)
-        self._tts.levelChanged.connect(self._on_speech_level)
-        self._stt.started.connect(self._on_stt_started)
-        self._stt.transcribing.connect(self._on_stt_transcribing)
-        self._stt.transcriptReady.connect(self._on_stt_transcript)
-        self._stt.failed.connect(self._on_stt_failed)
-        self._stt.levelChanged.connect(self._on_listening_level)
-        # Wake callbacks originate on the sherpa capture thread. Make the
-        # handoff explicit so state changes and STT startup always run on the
-        # controller's Qt thread.
-        self._wake.detected.connect(self._on_wake_detected, Qt.ConnectionType.QueuedConnection)
-        self._wake.commandReady.connect(self._on_wake_command, Qt.ConnectionType.QueuedConnection)
-        self._wake.failed.connect(self._on_wake_failed, Qt.ConnectionType.QueuedConnection)
-        self._wake.start()
 
     @staticmethod
     def _load_wake_command_timeout() -> float:
