@@ -154,7 +154,18 @@ class KokoroProvider:
             callbacks.started()
             log.warning("WAKE_DEBUG TTS playback process started generation=%d pid=%d path=%s", generation, play.pid, temp_path)
             callbacks.level(1.0)
-            play.wait()
+            actual_rate = sample_rate or SAMPLE_RATE
+            duration_sec = len(pcm) / float(actual_rate) if actual_rate > 0 else 5.0
+            playback_timeout = max(10.0, duration_sec + 5.0)
+            try:
+                play.wait(timeout=playback_timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    play.kill()
+                    play.wait(timeout=1.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise RuntimeError("Kokoro playback timed out")
             if play.returncode == 0:
                 log.warning("WAKE_DEBUG TTS playback success generation=%d pid=%d", generation, play.pid)
             else:

@@ -202,6 +202,7 @@ class TTSManager(QObject):
         self._maybe_finish_stream()
 
     def stop(self) -> None:
+        self._cancel_watchdog()
         with self._lock:
             self._generation += 1
             self._speaking = False
@@ -263,6 +264,7 @@ class TTSManager(QObject):
     def _provider_finished(self, generation: int) -> None:
         if not self._valid(generation):
             return
+        self._cancel_watchdog()
         log.warning("WAKE_DEBUG TTS synthesis/playback success generation=%d", generation)
         with self._lock:
             self._chunk_active = False
@@ -283,6 +285,7 @@ class TTSManager(QObject):
         log.warning("WAKE_DEBUG TTS provider failed generation=%d detail=%r", generation, message)
         if not self._valid(generation):
             return
+        self._cancel_watchdog()
         with self._lock:
             self._chunk_active = False
             self._streaming = False
@@ -302,8 +305,33 @@ class TTSManager(QObject):
         if voice is None:
             self._provider_failed(generation, f"No installed {provider.name} voice selected")
             return
+        self._start_watchdog(generation)
         rate = float(self._config.get("rate", 1.0))
         provider.speak(chunk, voice, rate, _Callbacks(self, generation))
+
+    def _start_watchdog(self, generation: int, timeout_seconds: float = 25.0) -> None:
+        self._cancel_watchdog()
+        timer = threading.Timer(timeout_seconds, self._on_watchdog_timeout, args=(generation,))
+        timer.daemon = True
+        with self._lock:
+            if generation == self._generation:
+                self._watchdog_timer = timer
+                timer.start()
+
+    def _cancel_watchdog(self) -> None:
+        with self._lock:
+            timer = getattr(self, "_watchdog_timer", None)
+            self._watchdog_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _on_watchdog_timeout(self, generation: int) -> None:
+        log.warning("WAKE_DEBUG TTS watchdog timeout triggered generation=%d", generation)
+        if not self._valid(generation):
+            return
+        for provider in self._providers.values():
+            provider.stop()
+        self._provider_failed(generation, "TTS chunk watchdog timeout")
 
     def _maybe_finish_stream(self) -> None:
         with self._lock:

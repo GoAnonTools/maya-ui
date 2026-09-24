@@ -104,7 +104,15 @@ class PiperProvider:
             )
             with self._lock:
                 self._piper_process = process
-            _stdout, stderr = process.communicate(text.encode("utf-8"))
+            try:
+                _stdout, stderr = process.communicate(text.encode("utf-8"), timeout=15.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                    process.wait(timeout=1.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise RuntimeError("Piper synthesis timed out")
             if process.returncode != 0:
                 detail = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
                 raise RuntimeError(detail or "Piper synthesis failed")
@@ -115,7 +123,17 @@ class PiperProvider:
                 self._play_process = play
             callbacks.started()
             callbacks.level(1.0)
-            play.wait()
+            # Estimate playback duration from text length + safety margin
+            playback_timeout = max(10.0, len(text) * 0.15 + 5.0)
+            try:
+                play.wait(timeout=playback_timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    play.kill()
+                    play.wait(timeout=1.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise RuntimeError("Piper playback timed out")
             callbacks.level(0.0)
             if self._current(generation):
                 callbacks.finished()

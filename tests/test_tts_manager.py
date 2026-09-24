@@ -150,6 +150,101 @@ class TTSManagerReplacementTests(unittest.TestCase):
             "Fourth sentence arrives later too.",
         ])
 
+    def test_piper_playback_timeout_triggers_failure_callback(self):
+        from unittest.mock import MagicMock, patch
+        import subprocess
+        from backend.tts.piper_provider import PiperProvider
+        from backend.tts.base import Voice
+
+        provider = PiperProvider()
+        provider._generation = 1
+        callbacks = MagicMock()
+        voice = Voice("test-voice", "piper", "en", "female", "/tmp/nonexistent.onnx")
+
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch("subprocess.Popen") as mock_popen:
+            mock_piper = MagicMock()
+            mock_piper.communicate.return_value = (b"", b"")
+            mock_piper.returncode = 0
+            mock_play = MagicMock()
+            mock_play.wait.side_effect = subprocess.TimeoutExpired(cmd="pw-play", timeout=10.0)
+            mock_popen.side_effect = [mock_piper, mock_play]
+
+            provider._run(1, "Hello world", voice, 1.0, callbacks)
+
+            mock_play.kill.assert_called_once()
+            callbacks.failed.assert_called_once()
+            self.assertIn("timed out", callbacks.failed.call_args[0][0])
+
+    def test_piper_synthesis_timeout_triggers_failure_callback(self):
+        from unittest.mock import MagicMock, patch
+        import subprocess
+        from backend.tts.piper_provider import PiperProvider
+        from backend.tts.base import Voice
+
+        provider = PiperProvider()
+        provider._generation = 1
+        callbacks = MagicMock()
+        voice = Voice("test-voice", "piper", "en", "female", "/tmp/nonexistent.onnx")
+
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch("subprocess.Popen") as mock_popen:
+            mock_piper = MagicMock()
+            mock_piper.communicate.side_effect = subprocess.TimeoutExpired(cmd="piper", timeout=15.0)
+            mock_popen.return_value = mock_piper
+
+            provider._run(1, "Hello world", voice, 1.0, callbacks)
+
+            mock_piper.kill.assert_called_once()
+            callbacks.failed.assert_called_once()
+            self.assertIn("timed out", callbacks.failed.call_args[0][0])
+
+    def test_kokoro_playback_timeout_triggers_failure_callback(self):
+        from unittest.mock import MagicMock, patch
+        import subprocess
+        from backend.tts.kokoro_provider import KokoroProvider
+        from backend.tts.base import Voice
+
+        provider = KokoroProvider()
+        provider._generation = 1
+        callbacks = MagicMock()
+        voice = Voice("af_heart", "kokoro", "en-us", "female", "/tmp/model.onnx")
+
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch.object(provider, "_engine", create=True) as mock_engine, \
+             patch("tempfile.mkstemp", return_value=(123, "/tmp/maya-test-kokoro.wav")), \
+             patch("os.close"), \
+             patch("wave.open"), \
+             patch("pathlib.Path.stat"), \
+             patch("pathlib.Path.unlink"), \
+             patch("subprocess.Popen") as mock_popen:
+            mock_engine.create.return_value = (([0.1] * 24000), 24000)
+            mock_play = MagicMock()
+            mock_play.wait.side_effect = subprocess.TimeoutExpired(cmd="paplay", timeout=10.0)
+            mock_popen.return_value = mock_play
+
+            provider._run(1, "Hello world", voice, 1.0, callbacks)
+
+            mock_play.kill.assert_called_once()
+            callbacks.failed.assert_called_once()
+            self.assertIn("timed out", callbacks.failed.call_args[0][0])
+
+    def test_tts_manager_watchdog_timeout_recovers_speaking_state(self):
+        manager = TTSManager()
+        failed_signals = []
+        manager.failed.connect(lambda gen, msg: failed_signals.append((gen, msg)))
+
+        with manager._lock:
+            manager._generation = 5
+            manager._chunk_active = True
+            manager._speaking = True
+
+        manager._on_watchdog_timeout(5)
+
+        self.assertFalse(manager._chunk_active)
+        self.assertFalse(manager._speaking)
+        self.assertEqual(failed_signals, [(5, "TTS chunk watchdog timeout")])
+
 
 if __name__ == "__main__":
     unittest.main()
