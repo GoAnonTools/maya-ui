@@ -126,6 +126,13 @@ class MayaController(QObject):
         self._listening_level = 0.0
         self._stt_generation = 0
         self._wake_command_path = None
+        # Set True when wake is detected and armed the timeout, cleared once
+        # _on_wake_command runs. Used by _on_wake_timeout to grant a one-time
+        # grace reprieve if the timeout fires in the same Qt tick as
+        # commandReady — without it, the timeout would race ahead of the
+        # queued _on_wake_command slot and silently discard a command the
+        # user did finish speaking (audit P2).
+        self._wake_command_pending = False
         self._wake_command_timeout_seconds = self._load_wake_command_timeout()
         self._context_size = self._load_context_size()
         self._memory = memory_service if memory_service is not None else MemoryService.from_config()
@@ -220,6 +227,28 @@ class MayaController(QObject):
             self._wake_timeout_timer.stop()
         self._wake_timeout_started_at = None
 
+    def _release_wake_command(self, reason: str) -> None:
+        """Release the pending wake-command temp WAV (if any) and clear the path.
+
+        The wake provider's release_command is idempotent (unlink(missing_ok=True)),
+        so this is safe to call even when the path has already been released.
+
+        Every code path that invalidates self._stt_generation (or overwrites
+        self._wake_command_path with a new path) MUST call this first. Without it,
+        the stale STT callback that would normally release the path (in
+        _on_stt_transcript / _on_stt_failed) is silently dropped because
+        generation != self._stt_generation, and the temp WAV leaks on disk
+        with self._wake_command_path left pointing at a file that no longer
+        exists (audit P1).
+        """
+        if self._wake_command_path is not None:
+            log.warning("WAKE_DEBUG releasing stale wake command path=%s reason=%s", self._wake_command_path, reason)
+            try:
+                self._wake.release_command(self._wake_command_path)
+            except Exception:
+                log.exception("Failed to release wake command path=%s", self._wake_command_path)
+            self._wake_command_path = None
+
     def _start_wake_timeout(self, duration: float | None = None) -> None:
         self._cancel_wake_timeout("restart")
         if duration is None:
@@ -239,7 +268,28 @@ class MayaController(QObject):
         elapsed = time.monotonic() - started_at if started_at is not None else 0.0
         log.warning("WAKE_DEBUG wake command timeout expired elapsed=%.3fs state=%s request_active=%s", elapsed, self._state, self._request_active)
         if self._state == "listening" and not self._request_active and self._wake_command_path is None:
+            # Race guard: if a wake command was detected (arming this timer)
+            # but _on_wake_command hasn't run yet, the command audio might
+            # still be in flight from the wake engine's background thread.
+            # Rather than silently dropping the command by transitioning to
+            # idle, grant a one-time grace reprieve so the queued
+            # _on_wake_command slot gets a chance to run on the next event
+            # loop iteration. The flag is cleared here so the next timeout
+            # fires unconditionally (audit P2).
+            if self._wake_command_pending:
+                log.warning("WAKE_DEBUG wake command timeout grace reprieve granted — command may still be in flight")
+                self._wake_command_pending = False
+                self._start_wake_timeout(1.0)
+                return
             log.warning("WAKE_DEBUG wake command timeout transitioning state listening -> idle")
+            # Stop STT if it was armed for the post-stop 5-second follow-up
+            # window (by _handle_stop_command). Without this, transitioning
+            # to "idle" would resume the wake engine via set_mode("idle") ->
+            # wake.start() while STT still holds the mic, causing both to
+            # compete for the audio device. Safe to call unconditionally:
+            # cancel() just bumps the generation if STT isn't running
+            # (audit P1).
+            self._stt.cancel()
             self.set_state("idle")
 
     def _get_state(self):
@@ -337,18 +387,115 @@ class MayaController(QObject):
         if self._llm_worker is not None:
             self._llm_worker.cancel()
         self._tts.stop()
+        # Release any pending wake-command WAV before bumping the STT
+        # generation — transcribe_file's eventual callback will be stale
+        # and silently drop the path otherwise (audit P1).
+        self._release_wake_command("cancel_active_task")
         self._stt.cancel()
         self._request_active = False
         self.set_state("idle")
+
+    @Slot()
+    def shutdown(self):
+        """Teardown every voice subsystem for clean process exit.
+
+        Without this, an abrupt quit while any of pw-record / whisper-cli /
+        piper / kokoro / sherpa-wake is active can orphan the subprocess
+        holding the microphone/audio device, surfacing as "mic busy" on the
+        next launch. Each manager's stop()/cancel() already terminates its
+        subprocesses; this method just calls them all in the right order
+        and tolerates partial failure (audit P2).
+
+        Order:
+          1. Cancel the LLM worker (no new TTS/STT callbacks fire during teardown)
+          2. Quit and wait for the LLM QThread
+          3. Stop TTS (kill piper/kokoro playback)
+          4. Cancel STT (kill pw-record + whisper-cli, drop pending callbacks)
+          5. Stop the wake engine (kill sherpa wake-capture)
+          6. Release any pending wake-command temp WAV
+          7. Cancel the wake timeout timer
+        """
+        log.info("Maya shutdown starting state=%s request_active=%s", self._state, self._request_active)
+
+        # 1. Cancel any in-flight LLM worker so its eventReady signals stop
+        # arriving during teardown. runner.py's runCompleted signal already
+        # wires thread.quit(); we just need to trigger it.
+        if self._llm_worker is not None:
+            try:
+                self._llm_worker.cancel()
+            except Exception:
+                log.exception("shutdown: LLM worker cancel failed")
+
+        # 2. Quit and wait for the LLM QThread so we don't try to delete a
+        # running thread. runCompleted is wired to thread.quit(); if the
+        # worker already exited (normal/error), thread.quit() is a no-op.
+        thread = self._llm_thread
+        if thread is not None:
+            try:
+                thread.quit()
+                thread.wait(2000)  # 2s grace
+            except Exception:
+                log.exception("shutdown: LLM thread quit/wait failed")
+
+        # 3. Stop TTS — kills any active piper/kokoro playback subprocess.
+        try:
+            self._tts.stop()
+        except Exception:
+            log.exception("shutdown: TTS stop failed")
+
+        # 4. Cancel STT — kills pw-record AND whisper-cli subprocesses and
+        # bumps the generation so any in-flight callbacks are dropped. Use
+        # cancel() (not stop()) because stop() only terminates the record
+        # process and still tries to transcribe the partial WAV.
+        # Release any pending wake-command WAV first so its temp file is
+        # unlinked before its STT callback becomes stale (Round 2 fix).
+        try:
+            self._release_wake_command("shutdown")
+        except Exception:
+            log.exception("shutdown: wake command release failed")
+        try:
+            self._stt.cancel()
+        except Exception:
+            log.exception("shutdown: STT cancel failed")
+
+        # 5. Stop the wake engine — kills the sherpa wake-capture subprocess
+        # that owns the mic in idle/speaking states. Use stop() (not
+        # disable_runtime()) so the user's enabled/sensitivity config is
+        # preserved across restarts.
+        try:
+            self._wake.stop("shutdown")
+        except Exception:
+            log.exception("shutdown: wake stop failed")
+
+        # 6. Cancel the wake timeout timer so it doesn't fire after teardown.
+        try:
+            self._cancel_wake_timeout("shutdown")
+        except Exception:
+            log.exception("shutdown: wake timeout cancel failed")
+
+        self._request_active = False
+        log.info("Maya shutdown complete")
 
 
     @Slot(str)
     def submit(self, text):
         text = text.strip()
-        if not text or self._request_active:
-            if not text:
+        if not text:
+            return
+        if self._request_active:
+            # Allow explicit stop/cancel commands through so the user can
+            # interrupt the in-flight request via typed input. Anything else
+            # would tear down the in-flight TTS/streaming context before
+            # discovering whether the LLM thread is free, leaving the orphan
+            # stream running and its eventReady signals landing out of sync
+            # (audit P1 #3).
+            if not self._is_stop_command(text):
+                log.info("submit ignored because request already active state=%s text=%r", self._state, text)
                 return
-            self._tts.stop()
+        # Release any pending wake-command WAV before _stt.cancel() bumps the
+        # STT generation — transcribe_file's eventual callback will be stale
+        # and silently drop the path otherwise (audit P1).
+        self._release_wake_command("submit")
         self._stt.cancel()
         self._user_text = text
         self._assistant_text = ""
@@ -372,9 +519,32 @@ class MayaController(QObject):
             if self._llm_worker is not None:
                 self._llm_worker.cancel()
             self._tts.stop()
+            # Release any pending wake-command WAV before bumping the STT
+            # generation — transcribe_file's eventual callback will be stale
+            # and silently drop the path otherwise (audit P1).
+            self._release_wake_command("stop_command")
             self._stt.cancel()
             self._request_active = False
             self.set_state("listening")
+            # Arm STT so the 5-second follow-up window actually listens on
+            # the mic. set_state("listening") above called wake.set_mode(
+            # "listening"), which in turn called provider.pause() — and since
+            # this is a stop command (not a wake detection), command_mode is
+            # False, so the wake engine tore down its mic capture. Without
+            # arming STT here, the 5s window would be silent: no STT, no wake
+            # capture, and even a repeated wake word would be ignored because
+            # _on_wake_detected excludes "listening". Mirrors start_ptt()
+            # (audit P1).
+            stt_generation = self._stt.start()
+            if stt_generation is not None:
+                self._stt_generation = stt_generation
+            # Clear the race-guard flag: the post-stop 5s window doesn't expect
+            # a wake command (the wake engine is paused in "listening" mode
+            # outside command_mode), so the timeout must not grant a grace
+            # reprieve if it fires. Without this, a stale True from a previous
+            # wake detection could cause the 5s window to extend by 1s for
+            # no reason (audit P2 defensive clear).
+            self._wake_command_pending = False
             self._start_wake_timeout(5.0)
             return True
         return False
@@ -382,11 +552,28 @@ class MayaController(QObject):
 
     def _submit_request(self, user_text, language_instruction, chat_id, language, source):
         """Route explicit memory actions locally, otherwise submit with bounded context."""
+        # Explicit stop commands must always be allowed — they tear down the
+        # in-flight request via worker.cancel() + _request_active=False (audit
+        # P0 #2 mirror in _handle_stop_command).
         if self._handle_stop_command(user_text):
+            return
+
+        # Guard against dispatching while a request is already in flight.
+        # submit() refuses new typed input while _request_active is True
+        # (audit P1 #3) but still allows stop commands through, and the retry
+        # path in _on_failed clears _request_active before invoking us. This
+        # catches any other caller — e.g. an STT transcript arriving while a
+        # previous request is still active — and also prevents memory input
+        # and local skill responses from tearing down the in-flight TTS
+        # context via _present_local_reply (which stops TTS and bumps
+        # _tts_generation before checking whether the LLM thread is free).
+        if self._request_active:
+            log.warning("submit_request ignored because request already active source=%s state=%s", source, getattr(self, "_state", "idle"))
             return
 
         if self._handle_memory_input(user_text):
             return
+
 
 
         local_reply = local_skill_response(user_text, mcp_client=self._mcp_client)
@@ -448,10 +635,14 @@ class MayaController(QObject):
         worker.eventReady.connect(self._on_llm_event)
         worker.streamEnded.connect(self._on_completed)
         worker.failed.connect(self._on_failed)
-        worker.streamEnded.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.streamEnded.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
+        # runCompleted fires on every exit of LLMStreamWorker.run(): normal
+        # completion, exception, and early return due to cancellation. The
+        # inner streamEnded/failed signals are deliberately suppressed on
+        # cancellation, so wiring thread.quit()/deleteLater to them alone
+        # leaves the QThread spinning forever after the first cancel (audit
+        # P0). runCompleted is the only guaranteed terminal signal.
+        worker.runCompleted.connect(thread.quit)
+        worker.runCompleted.connect(worker.deleteLater)
         thread.finished.connect(self._on_llm_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._llm_thread = thread
@@ -467,6 +658,9 @@ class MayaController(QObject):
 
     @Slot(object)
     def _on_llm_event(self, event):
+        if not self._request_active:
+            log.debug("Ignoring stale LLM event after cancellation")
+            return
         if isinstance(event, LLMConversation):
             try:
                 self._on_chat_ready(int(event.conversation_id))
@@ -481,11 +675,11 @@ class MayaController(QObject):
                 prefix = f"{RECOVERY_NOTICE}\n\n"
             text = (prefix + event.text) if event.replace or not self._assistant_text else (self._assistant_text + event.text)
             self._on_assistant_text(text)
-            if self._request_active:
-                self._tts.feed_response(text, replace=event.replace)
+            self._tts.feed_response(text, replace=event.replace)
         elif isinstance(event, (LLMCompleted,)):
             # Stream completion is handled once by LLMStreamWorker.streamEnded.
             return
+
 
     @staticmethod
     def _memory_command(text):
@@ -497,8 +691,9 @@ class MayaController(QObject):
         match = re.fullmatch(r"(?:maya[, ]+)?(?:please\s+)?forget(?:\s+(?:that|memory))?\s+(.+)", value, re.IGNORECASE)
         if match:
             return "forget", match.group(1).strip()
-        if re.fullmatch(r"(?:maya[, ]+)?(?:please\s+)?clear\s+(?:(?:all|my)\s+)?memory", value, re.IGNORECASE):
-            return "clear", ""
+        match = re.fullmatch(r"(?:maya[, ]+)?(?:please\s+)?clear(?:\s+all)?\s+memor(?:y|ies)", value, re.IGNORECASE)
+        if match:
+            return "clear_all", None
         return None
 
     def _handle_memory_input(self, text):
@@ -531,92 +726,95 @@ class MayaController(QObject):
                     self._set_pending_memory_action("remember", {"content": normalized})
                     self._present_local_reply(f"Should I remember: {normalized}? Please say yes or no.")
             except Exception:
-                log.exception("Could not prepare explicit remember request")
+                log.exception("Failed to prepare remember action")
                 self._present_local_reply("I could not prepare that memory request.")
             return True
-        if kind == "clear":
-            self._set_pending_memory_action("clear", {})
+        if kind == "forget":
+            return self._handle_forget_input(value)
+        if kind == "clear_all":
+            self._set_pending_memory_action("clear_all", None)
             self._present_local_reply("Should I clear all saved Maya memories? This cannot be undone. Please say yes or no.")
             return True
-        self._begin_forget(value)
+        return False
+
+    def _handle_forget_input(self, value: str) -> bool:
+        items = []
+        try:
+            search_term = value.casefold().strip()
+            items = [item for item in self._memory.list_items() if search_term in item.content.casefold()]
+        except Exception:
+            log.exception("Memory search failed during forget")
+            self._present_local_reply("I could not access saved memories. Nothing was deleted.")
+            return True
+        if not items:
+            self._present_local_reply("I could not find a saved memory matching that. Nothing was deleted.")
+            return True
+        if len(items) == 1:
+            self._set_pending_memory_action("forget", {"id": items[0].id, "content": items[0].content})
+            self._present_local_reply(f"Should I forget this saved memory: {items[0].content}? Please say yes or no.")
+            return True
+        if len(items) <= 5:
+            lines = [f"{idx + 1}. {item.content}" for idx, item in enumerate(items)]
+            self._set_pending_memory_action(
+                "forget_select",
+                {"items": [{"id": i.id, "content": i.content} for i in items]}
+            )
+            self._present_local_reply(
+                "I found several possible memories. Reply with a number to choose:\n" + "\n".join(lines)
+            )
+            return True
+        self._present_local_reply("I found too many matching memories. Please be more specific.")
         return True
 
-    def _set_pending_memory_action(self, kind, payload):
+    def _set_pending_memory_action(self, kind: str, payload) -> None:
         self._pending_memory_action = {
             "kind": kind,
             "payload": payload,
-            "expires": time.monotonic() + 90.0,
+            "expires": time.monotonic() + 60.0,
         }
 
-    def _begin_forget(self, description):
-        try:
-            items = self._memory.list_items()
-            needle = " ".join(re.findall(r"\w+", description.casefold()))
-            exact = [item for item in items if " ".join(item.content.casefold().split()) == " ".join(description.casefold().split())]
-            if exact:
-                candidates = exact
-            else:
-                terms = set(needle.split())
-                scored = [(len(terms & set(re.findall(r"\w+", item.content.casefold()))), item) for item in items]
-                best = max((score for score, _item in scored), default=0)
-                candidates = [item for score, item in scored if score == best and score > 0]
-            if not candidates:
-                self._present_local_reply("I could not find a saved memory matching that. Nothing was deleted.")
-            elif len(candidates) == 1:
-                item = candidates[0]
-                self._set_pending_memory_action("forget", {"memory_id": item.id, "content": item.content})
-                self._present_local_reply(f"Should I forget this saved memory: {item.content}? Please say yes or no.")
-            else:
-                choices = candidates[:3]
-                self._set_pending_memory_action("forget_choice", {"items": [(item.id, item.content) for item in choices]})
-                lines = " ".join(f"{index + 1}: {item.content[:160]}." for index, item in enumerate(choices))
-                self._present_local_reply(f"I found several possible memories. Reply with a number to choose: {lines}")
-        except Exception:
-            log.exception("Could not look up explicit forget request")
-            self._present_local_reply("I could not access saved memories. Nothing was deleted.")
+    def _handle_memory_confirmation(self, text: str, pending: dict) -> bool:
+        affirmative = {"yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "do it", "please"}
+        negative = {"no", "n", "nope", "cancel", "stop", "never mind", "don't", "dont"}
+        normalized = text.strip().casefold()
+        normalized = re.sub(r"^(?:maya[, ]+)?(?:please\s+)?", "", normalized).strip()
+        normalized = re.sub(r"[.!?]+$", "", normalized).strip()
 
-    def _handle_memory_confirmation(self, text, pending):
-        answer = text.strip().casefold().strip(" .!?")
-        if pending["kind"] == "forget_choice":
-            if answer in {"cancel", "no", "never mind", "nevermind"}:
+        if pending["kind"] == "forget_select":
+            if normalized in negative:
                 self._pending_memory_action = None
-                self._present_local_reply("Okay. Nothing was deleted.")
+                self._present_local_reply("Okay. No memory was changed.")
                 return True
-            if not re.fullmatch(r"\d+", answer):
+            try:
+                choice = int(normalized) - 1
+                items = pending["payload"]["items"]
+                if choice < 0 or choice >= len(items):
+                    self._present_local_reply("That number is not one of the listed choices. Please choose again or cancel.")
+                    return True
+                selected = items[choice]
+                self._set_pending_memory_action("forget", {"id": selected["id"], "content": selected["content"]})
+                self._present_local_reply(f"Should I forget this saved memory: {selected['content']}? Please say yes or no.")
+                return True
+            except ValueError:
                 return False
-            choices = pending["payload"]["items"]
-            index = int(answer) - 1
-            if index < 0 or index >= len(choices):
-                self._present_local_reply("That number is not one of the listed choices. Please choose again or cancel.")
-                return True
-            memory_id, content = choices[index]
-            self._set_pending_memory_action("forget", {"memory_id": memory_id, "content": content})
-            self._present_local_reply(f"Should I forget this saved memory: {content}? Please say yes or no.")
-            return True
 
-        if answer in {"no", "cancel", "never mind", "nevermind"}:
-            self._pending_memory_action = None
+        if normalized in negative:
             self._present_local_reply("Okay. No memory was changed.")
             return True
-        if answer not in {"yes", "confirm", "confirmed", "do it"}:
+        if normalized not in affirmative:
             return False
-
-        self._pending_memory_action = None
         try:
             kind = pending["kind"]
             payload = pending["payload"]
             if kind == "remember":
                 self._memory.remember(payload["content"], category=MemoryCategory.OTHER)
-                message = "I saved that memory."
+                self._present_local_reply("Okay, I'll remember that.")
             elif kind == "forget":
-                removed = self._memory.forget(payload["memory_id"])
-                message = "I forgot that memory." if removed else "That memory was already gone."
-            elif kind == "clear":
-                count = self._memory.clear()
-                message = f"I cleared {count} saved memories."
-            else:
-                message = "I could not complete that memory action."
-            self._present_local_reply(message)
+                self._memory.forget(payload["id"])
+                self._present_local_reply(f"Okay. I forgot: {payload['content']}")
+            elif kind == "clear_all":
+                self._memory.clear()
+                self._present_local_reply("Okay. All saved memories have been cleared.")
         except Exception:
             log.exception("Confirmed memory action failed kind=%s", pending["kind"])
             self._present_local_reply("I could not complete that memory action. No success was recorded.")
@@ -680,6 +878,10 @@ class MayaController(QObject):
             return
         self._tts.stop()
         self._wake.set_mode("listening")
+        # Release any pending wake-command WAV before _stt.start() bumps the
+        # STT generation — transcribe_file's eventual callback will be stale
+        # and silently drop the path otherwise (audit P1).
+        self._release_wake_command("start_ptt")
         stt_generation = self._stt.start()
         if stt_generation is not None:
             self._stt_generation = stt_generation
@@ -760,17 +962,46 @@ class MayaController(QObject):
             log.warning("WAKE_DEBUG wake event ignored because controller state=%s", self._state)
             return
 
+        # Cancel any in-flight LLM worker so its eventReady signals stop
+        # arriving. Without this, a stream started during "thinking" keeps
+        # running in the background while the controller moves to "listening",
+        # and its stale output (LLMTextDelta, LLMState) lands out of sync with
+        # whatever the user is doing by then. Mirrors _handle_stop_command /
+        # cancel_active_task (audit P0 #2).
+        if self._llm_worker is not None:
+            self._llm_worker.cancel()
+        # _request_active must be cleared here, not just by _on_completed /
+        # _on_failed, because cancellation suppresses both of those signals —
+        # leaving _request_active stuck True would refuse every future typed
+        # submit (audit P1 #3).
+        self._request_active = False
+
         # Invalidate controller-side callbacks as well as the TTS provider's
         # generation. This covers queued Qt signals from the interrupted audio.
         self._tts.stop()
         self._tts_generation += 1
         log.warning("WAKE_DEBUG controller setting listening state after wake detection")
         self.set_state("listening")
+        # Mark that a wake command is expected — _on_wake_timeout will grant
+        # a one-time grace reprieve if it fires before _on_wake_command runs,
+        # so we don't silently discard a command the user finished speaking
+        # (audit P2).
+        self._wake_command_pending = True
         self._start_wake_timeout()
 
     @Slot(str)
     def _on_wake_command(self, path):
         log.warning("WAKE_DEBUG controller received wake command path=%s state=%s", path, self._state)
+        # Clear the race-guard flag: the command audio has arrived, so any
+        # subsequent wake timeout firing is a real no-speech timeout, not a
+        # race-ahead of this slot (audit P2).
+        self._wake_command_pending = False
+        # If a previous wake command is still pending (its transcription hasn't
+        # completed yet), release its temp WAV before overwriting the reference.
+        # Without this, the previous file would be orphaned on disk and
+        # _wake_command_path would point at a file that was never released
+        # (audit P1).
+        self._release_wake_command("wake_command_overwrite")
         self._cancel_wake_timeout("command audio ready")
         if self._state != "listening":
             self._wake.release_command(path)

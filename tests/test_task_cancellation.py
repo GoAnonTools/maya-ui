@@ -8,8 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
 
-from backend.llm.base import LLMCapabilities, LLMEvent, LLMProvider, LLMRequest, LLMTextDelta
+from backend.llm.base import LLMCapabilities, LLMEvent, LLMProvider, LLMRequest, LLMState, LLMTextDelta
 from backend.llm.runner import LLMStreamWorker
+
 from backend.maya_controller import MayaController
 
 
@@ -177,14 +178,78 @@ class TestMayaControllerCancellation(unittest.TestCase):
             controller._on_wake_detected()
             self.assertEqual(controller.state, "listening")
 
-        # In error state, wake detection should be ignored
-        controller.set_state("error")
-        controller._on_wake_detected()
-        self.assertEqual(controller.state, "error")
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_stale_llm_state_event_ignored_after_wake_interruption(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._request_active = True
+        controller.set_state("thinking")
 
+        mock_worker = MagicMock()
+        controller._llm_worker = mock_worker
+
+        # User wake interruption occurs
+        controller._on_wake_detected()
+        self.assertEqual(controller.state, "listening")
+        self.assertFalse(controller._request_active)
+        mock_worker.cancel.assert_called_once()
+
+        # Emit delayed/stale LLMState events from the cancelled task
+        controller._on_llm_event(LLMState(state="thinking", detail="Late thinking event"))
+        self.assertEqual(controller.state, "listening")
+
+        controller._on_llm_event(LLMState(state="tool", detail="Late tool event"))
+        self.assertEqual(controller.state, "listening")
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_normal_llm_state_transition_works(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._request_active = True
+        controller.set_state("thinking")
+
+        # Emit LLMState while request is active
+        controller._on_llm_event(LLMState(state="tool", detail="Running tool..."))
+        self.assertEqual(controller.state, "tool")
+        self.assertEqual(controller.detail, "Running tool...")
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_stale_llm_text_delta_ignored_after_cancellation(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._request_active = True
+        controller._assistant_text = "Initial text"
+        controller.set_state("thinking")
+
+        mock_worker = MagicMock()
+        controller._llm_worker = mock_worker
+
+        # Cancel the request
+        controller.cancel_active_task()
+        self.assertEqual(controller.state, "idle")
+        self.assertFalse(controller._request_active)
+
+        # Reset TTS mock calls from cancel_active_task
+        controller._tts.feed_response.reset_mock()
+
+        # Simulate a late LLMTextDelta event
+        controller._on_llm_event(LLMTextDelta(" additional stale text"))
+
+        # Verify assistant text is not modified, state is unchanged, and TTS is not fed
+        self.assertEqual(controller._assistant_text, "Initial text")
+        self.assertEqual(controller.state, "idle")
+        controller._tts.feed_response.assert_not_called()
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
 

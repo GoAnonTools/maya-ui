@@ -22,6 +22,12 @@ def main() -> int:
     ipc_server.messageReceived.connect(controller.apply_message)
     ipc_server.start()
     app.aboutToQuit.connect(ipc_server.stop)
+    # Tear down every voice subsystem before the Qt event loop exits so that
+    # pw-record / whisper-cli / piper / kokoro / sherpa-wake subprocesses are
+    # terminated cleanly. Without this, an abrupt quit while any of them is
+    # active can orphan the process holding the microphone/audio device,
+    # surfacing as "mic busy" on the next launch (audit P2).
+    app.aboutToQuit.connect(controller.shutdown)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("mayaController", controller)
     qml_path = os.path.join(os.path.dirname(__file__), "qml", "Main.qml")

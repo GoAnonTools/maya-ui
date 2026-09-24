@@ -16,6 +16,10 @@ class LLMStreamWorker(QObject):
     eventReady = Signal(object)
     streamEnded = Signal()
     failed = Signal(str)
+    # Emitted unconditionally when run() exits, including on cancellation.
+    # streamEnded and failed are suppressed by the cancellation guard, so
+    # thread teardown must be wired to this signal, not to those two.
+    runCompleted = Signal()
 
     def __init__(self, provider: LLMProvider, request: LLMRequest) -> None:
         super().__init__()
@@ -41,23 +45,32 @@ class LLMStreamWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        # runCompleted is emitted in the finally block so it always fires,
+        # including when an early return exits due to cancellation.  The
+        # try/except/else block below suppresses streamEnded/failed on
+        # cancellation (correct), but that made thread.quit() unreachable
+        # when wired to those signals.  Wire thread teardown to runCompleted
+        # instead (see MayaController._start_provider_request).
         try:
-            for event in self._provider.stream(self._request):
+            try:
+                for event in self._provider.stream(self._request):
+                    if self.is_cancelled():
+                        log.info("LLMStreamWorker loop stopped due to cancellation")
+                        return
+                    self.eventReady.emit(event)
                 if self.is_cancelled():
-                    log.info("LLMStreamWorker loop stopped due to cancellation")
+                    log.info("LLMStreamWorker stream finished but cancelled before completion signal")
                     return
-                self.eventReady.emit(event)
-            if self.is_cancelled():
-                log.info("LLMStreamWorker stream finished but cancelled before completion signal")
-                return
-        except LLMProviderError as exc:
-            if not self.is_cancelled():
-                self.failed.emit(str(exc))
-        except Exception:
-            if not self.is_cancelled():
-                log.exception("Unexpected LLM provider failure provider=%s", getattr(self._provider, "name", "unknown"))
-                self.failed.emit("Assistant failed")
-        else:
-            if not self.is_cancelled():
-                self.streamEnded.emit()
-
+            except LLMProviderError as exc:
+                if not self.is_cancelled():
+                    self.failed.emit(str(exc))
+            except Exception:
+                if not self.is_cancelled():
+                    log.exception("Unexpected LLM provider failure provider=%s", getattr(self._provider, "name", "unknown"))
+                    self.failed.emit("Assistant failed")
+            else:
+                if not self.is_cancelled():
+                    self.streamEnded.emit()
+        finally:
+            log.info("LLMStreamWorker run() exiting cancelled=%s", self.is_cancelled())
+            self.runCompleted.emit()
