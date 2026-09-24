@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""List and change Maya's user-owned Piper/Kokoro voice configuration."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+CONFIG = Path.home() / ".config" / "maya" / "voice.json"
+PIPER_ROOT = Path.home() / ".local" / "share" / "maya" / "voices"
+KOKORO_ROOT = Path.home() / ".local" / "share" / "maya" / "tts" / "kokoro"
+KOKORO_VOICES = KOKORO_ROOT / "voices-v1.0.bin"
+
+
+def load() -> dict:
+    defaults = {"enabled": True, "provider": "piper", "voice": "en_US-amy-medium", "rate": 1.0}
+    try:
+        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            defaults.update(data)
+    except (OSError, ValueError):
+        pass
+    return defaults
+
+
+def save(data: dict) -> None:
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def voices(provider: str) -> list[str]:
+    if provider == "piper":
+        return sorted(path.parent.name for path in PIPER_ROOT.glob("*/*.onnx") if path.with_suffix(".onnx.json").exists())
+    if provider == "kokoro" and KOKORO_VOICES.exists():
+        site = KOKORO_ROOT / "venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        sys.path.insert(0, str(site))
+        try:
+            import numpy as np
+            return sorted(np.load(KOKORO_VOICES).files)
+        except (ImportError, OSError, ValueError):
+            return []
+    return []
+
+
+def available_providers() -> list[str]:
+    return [provider for provider in ("piper", "kokoro") if voices(provider)]
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    data = load()
+    command = args[0] if args else "current"
+    if command == "providers":
+        for provider in available_providers():
+            marker = " (selected)" if provider == data.get("provider") else ""
+            print(provider + marker)
+        return 0
+    if command == "list":
+        provider = str(data.get("provider", "piper"))
+        installed = voices(provider)
+        print(f"provider={provider}")
+        if not installed:
+            print("No voices installed.")
+        for voice in installed:
+            marker = " (selected)" if voice == data.get("voice") else ""
+            print(f"{voice}{marker}")
+        return 0
+    if command == "current":
+        print(f"provider={data.get('provider', 'piper')}")
+        print(f"voice={data.get('voice', '')}")
+        print(f"enabled={str(bool(data.get('enabled', True))).lower()}")
+        print(f"rate={data.get('rate', 1.0)}")
+        return 0
+    if command == "provider" and len(args) == 2:
+        provider = args[1]
+        installed = voices(provider)
+        if not installed:
+            print(f"Provider is not installed: {provider}", file=sys.stderr)
+            return 2
+        data["provider"] = provider
+        if data.get("voice") not in installed:
+            data["voice"] = "af_bella" if provider == "kokoro" else "en_US-amy-medium"
+        save(data)
+        print(f"Selected provider {provider} with voice {data['voice']}")
+        return 0
+    if command == "set" and len(args) == 2:
+        provider = str(data.get("provider", "piper"))
+        if args[1] not in voices(provider):
+            print(f"Voice is not installed for {provider}: {args[1]}", file=sys.stderr)
+            return 2
+        data["voice"] = args[1]
+        save(data)
+        print(f"Selected {args[1]} ({provider})")
+        return 0
+    if command in {"enable", "disable"} and len(args) == 1:
+        data["enabled"] = command == "enable"
+        save(data)
+        print(f"TTS {'enabled' if data['enabled'] else 'disabled'}")
+        return 0
+    print("Usage: maya-voice {providers|list|current|set <voice>|provider <piper|kokoro>|enable|disable}", file=sys.stderr)
+    return 2
+
+
+raise SystemExit(main())

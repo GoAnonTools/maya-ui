@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="/home/theanarchitect/maya-ui"
+SERVICE="maya-ui.service"
+LOG="${XDG_RUNTIME_DIR:-/tmp}/maya-launch.log"
+
+log() {
+    printf '%s maya-launch %s\n' "$(date --iso-8601=seconds)" "$*" >>"$LOG"
+}
+
+log "execution started pid=$$"
+
+service_state="$(systemctl --user is-active "$SERVICE" 2>&1)"
+service_status=$?
+log "initial service state=$service_state status=$service_status"
+
+if [[ "$service_state" != "active" ]]; then
+    log "starting service=$SERVICE"
+    systemctl --user start "$SERVICE" >>"$LOG" 2>&1
+    start_status=$?
+    log "systemctl start result=$start_status"
+fi
+
+for attempt in {1..30}; do
+    service_state="$(systemctl --user is-active "$SERVICE" 2>&1)"
+    if [[ "$service_state" == "active" ]]; then
+        log "service became active attempt=$attempt"
+        for hide_attempt in {1..10}; do
+            hide_output="$("$ROOT/tools/hide-newelle" 2>&1)"
+            hide_status=$?
+            log "hide attempt=$hide_attempt status=$hide_status output=$(printf '%s' "$hide_output" | tr '\n' ' ')"
+            if [[ "$hide_status" -eq 0 ]]; then
+                log "Newelle hide succeeded; Maya service remains active"
+                exit 0
+            fi
+            sleep 1
+        done
+        log "service active but hide-newelle did not find a usable Newelle window"
+        exit 1
+    fi
+    sleep 1
+done
+
+log "timeout: service did not become active within 30 seconds; final_state=$service_state"
+exit 1

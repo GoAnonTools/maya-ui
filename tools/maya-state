@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Send one Maya state event over the local Unix socket."""
+
+import argparse
+import sys
+
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from backend.ipc_protocol import send_message, socket_path
+
+
+STATES = ("idle", "listening", "thinking", "speaking", "tool", "error")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Send a state event to Maya UI")
+    parser.add_argument("state", choices=STATES)
+    parser.add_argument("detail", nargs="?", default="")
+    args = parser.parse_args()
+    try:
+        send_message({"state": args.state, "detail": args.detail})
+    except OSError as exc:
+        print(f"maya-state: could not connect to {socket_path()}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

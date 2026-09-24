@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Inspect and select Maya's shared PipeWire microphone source."""
+from __future__ import annotations
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+CONFIG = Path.home() / ".config" / "maya" / "audio.json"
+
+def sources():
+    try:
+        result = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [line.split("\t")[1] for line in result.stdout.splitlines() if len(line.split("\t")) >= 2 and ".monitor" not in line.split("\t")[1]]
+
+def default():
+    try:
+        return subprocess.run(["pactl", "get-default-source"], capture_output=True, text=True, timeout=3).stdout.strip() or "default"
+    except (OSError, subprocess.TimeoutExpired):
+        return "default"
+
+def current():
+    try:
+        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    selected = str(data.get("input_source", "")).strip() or default()
+    available = sources()
+    if selected not in available and selected != "default":
+        print(f"selected={selected} (unavailable; fallback={default()})")
+    else:
+        print(f"selected={selected}")
+    print(f"default={default()}")
+
+args = sys.argv[1:]
+command = args[0] if args else "current"
+if command == "list":
+    for source in sources(): print(source)
+elif command == "current":
+    current()
+elif command == "set" and len(args) == 2:
+    source = args[1]
+    if source not in sources():
+        print(f"Input source is unavailable: {source}", file=sys.stderr); raise SystemExit(2)
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps({"input_source": source}, indent=2) + "\n", encoding="utf-8")
+    print(f"selected={source}")
+else:
+    print("Usage: maya-audio {list|current|set <source>}", file=sys.stderr); raise SystemExit(2)

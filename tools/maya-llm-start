@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -u
+
+CONFIG="${MAYA_LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/maya/llm.json}"
+LLAMA_SERVER="${MAYA_LLAMA_SERVER:-$HOME/.var/app/io.github.qwersyk.Newelle/config/models/llama.cpp/build/bin/llama-server}"
+
+if [[ ! -r "$CONFIG" ]]; then
+    echo "Maya LLM configuration not found: $CONFIG" >&2
+    exit 1
+fi
+if [[ ! -x "$LLAMA_SERVER" ]]; then
+    echo "llama-server is not executable: $LLAMA_SERVER" >&2
+    exit 1
+fi
+
+mapfile -t settings < <(python3 - "$CONFIG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = json.load(stream)
+
+required = ("model", "alias", "host", "port", "context_size", "gpu_layers")
+missing = [key for key in required if key not in config]
+if missing:
+    raise SystemExit("missing configuration keys: " + ", ".join(missing))
+
+for key in ("model", "alias", "host"):
+    print(f"{key}={config[key]}")
+for key in ("port", "context_size", "gpu_layers"):
+    print(f"{key}={int(config[key])}")
+print(f"reasoning={str(bool(config.get('reasoning', False))).lower()}")
+PY
+)
+
+if (( ${#settings[@]} == 0 )); then
+    echo "Unable to parse Maya LLM configuration: $CONFIG" >&2
+    exit 1
+fi
+for setting in "${settings[@]}"; do
+    case "$setting" in
+        model=*) MODEL=${setting#model=} ;;
+        alias=*) ALIAS=${setting#alias=} ;;
+        host=*) HOST=${setting#host=} ;;
+        port=*) PORT=${setting#port=} ;;
+        context_size=*) CONTEXT_SIZE=${setting#context_size=} ;;
+        gpu_layers=*) GPU_LAYERS=${setting#gpu_layers=} ;;
+        reasoning=*) REASONING=${setting#reasoning=} ;;
+    esac
+done
+
+if [[ ! -f "$MODEL" ]]; then
+    echo "Configured Qwen model not found: $MODEL" >&2
+    exit 1
+fi
+if [[ "$HOST" != "127.0.0.1" ]]; then
+    echo "Refusing to bind Maya LLM outside 127.0.0.1 (configured: $HOST)" >&2
+    exit 1
+fi
+
+if [[ "$REASONING" == "true" ]]; then
+    REASONING_ARGS=(--reasoning on)
+else
+    REASONING_ARGS=(--reasoning off)
+fi
+
+echo "Starting Maya llama-server: model=$MODEL alias=$ALIAS host=$HOST port=$PORT context=$CONTEXT_SIZE gpu_layers=$GPU_LAYERS" >&2
+exec "$LLAMA_SERVER" \
+    --model "$MODEL" \
+    --alias "$ALIAS" \
+    --host "$HOST" \
+    --port "$PORT" \
+    "${REASONING_ARGS[@]}" \
+    -c "$CONTEXT_SIZE" \
+    -ngl "$GPU_LAYERS"

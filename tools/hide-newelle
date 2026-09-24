@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -u
+
+HELPER="/home/theanarchitect/maya-ui/tools/kwin-newelle-window"
+
+# Newelle can create its window after the backend readiness hook has fired.
+# Retry the existing KWin action so the service remains headless once the
+# window becomes visible.
+for attempt in {1..15}; do
+    output="$(/usr/bin/python3 "$HELPER" hide 2>&1)"
+    status=$?
+    printf 'hide-newelle: attempt=%s status=%s output=%s\n' "$attempt" "$status" "$(printf '%s' "$output" | tr '\n' ' ')" >&2
+    if [[ "$status" -eq 0 ]]; then
+        printf 'hide-newelle: Newelle window hidden successfully on attempt=%s\n' "$attempt" >&2
+        exit 0
+    fi
+    sleep 1
+done
+
+printf 'hide-newelle: failed to find or hide the Newelle window after 15 attempts\n' >&2
+exit 1

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -u
+
+API="http://127.0.0.1:8081"
+TIMEOUT="${MAYA_BACKEND_TIMEOUT:-90}"
+deadline=$((SECONDS + TIMEOUT))
+
+while (( SECONDS < deadline )); do
+    response="$(curl -sS --max-time 3 -w $'\n%{http_code}' "$API/api/tools" 2>/dev/null || true)"
+    http_status="${response##*$'\n'}"
+    tools="${response%$'\n'*}"
+    if [[ "$http_status" == "200" ]] && python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)
+    tools = value if isinstance(value, list) else value.get("tools") if isinstance(value, dict) else None
+    raise SystemExit(0 if isinstance(tools, list) and bool(tools) else 1)
+except (json.JSONDecodeError, AttributeError, TypeError):
+    raise SystemExit(1)
+' <<<"$tools" 2>/dev/null; then
+        echo "Newelle GUI API ready with non-empty tools list." >&2
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "Newelle GUI API did not become ready within ${TIMEOUT}s." >&2
+exit 1

@@ -1,0 +1,75 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+.credentials
+credentials.local.*
+secrets.local.*
+tokens.local.*
+apikeys.local.*
+config/local/
+config/private/
+settings.local.*
+
+# Personal/runtime data
+:memory:.ses
+*.sqlite
+*.sqlite3
+*.db
+*.memory
+memory.sqlite*
+data/
+runtime/
+recordings/
+audio/
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# Temporary files, logs, and caches
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+cache/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Python environments and build output
+.venv/
+venv/
+env/
+ENV/
+dist/
+build/
+*.egg-info/
+
+# Downloaded model/runtime assets
+models/
+model-cache/
+downloads/
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Local agent/workspace metadata
+.agents/
+.codex/
+*.rollback
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

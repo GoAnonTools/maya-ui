@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Enable and inspect Maya's local sherpa-onnx wake detector."""
+from __future__ import annotations
+import json
+import sys
+import os
+import subprocess
+from pathlib import Path
+
+CONFIG = Path.home() / ".config" / "maya" / "wake.json"
+DEFAULTS = {"enabled": True, "provider": "sherpa-onnx", "phrase": "maya", "sensitivity": 0.6}
+
+def load():
+    data = dict(DEFAULTS)
+    try:
+        value = json.loads(CONFIG.read_text(encoding="utf-8"))
+        if isinstance(value, dict): data.update(value)
+    except (OSError, ValueError): pass
+    return data
+
+def save(data):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+args = sys.argv[1:]
+data = load()
+command = args[0] if args else "status"
+if command == "status":
+    for key in ("enabled", "provider", "phrase", "sensitivity"):
+        print(f"{key}={str(data[key]).lower() if isinstance(data[key], bool) else data[key]}")
+elif command in {"enable", "disable"} and len(args) == 1:
+    data["enabled"] = command == "enable"; save(data); print("wake " + ("enabled" if data["enabled"] else "disabled"))
+elif command == "sensitivity" and len(args) == 2:
+    try: value = max(0.0, min(1.0, float(args[1])))
+    except ValueError: print("sensitivity must be between 0 and 1", file=sys.stderr); raise SystemExit(2)
+    data["sensitivity"] = value; save(data); print(f"sensitivity={value}")
+elif command == "debug":
+    print("Following Maya wake diagnostics; this does not open another microphone capture.", flush=True)
+    os.execvp("journalctl", ["journalctl", "--user", "-u", "maya-ui.service", "-f", "-o", "cat"])
+else:
+    print("Usage: maya-wake {status|enable|disable|sensitivity <0..1>}", file=sys.stderr); raise SystemExit(2)

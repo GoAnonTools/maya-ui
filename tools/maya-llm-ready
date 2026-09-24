@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -u
+
+CONFIG="${MAYA_LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/maya/llm.json}"
+TIMEOUT="${MAYA_LLM_TIMEOUT:-90}"
+
+readarray -t settings < <(python3 - "$CONFIG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = json.load(stream)
+print(config["host"])
+print(int(config["port"]))
+print(config["alias"])
+PY
+)
+
+if (( ${#settings[@]} != 3 )); then
+    echo "Unable to read Maya LLM readiness configuration: $CONFIG" >&2
+    exit 1
+fi
+HOST=${settings[0]}
+PORT=${settings[1]}
+ALIAS=${settings[2]}
+API="http://${HOST}:${PORT}"
+deadline=$((SECONDS + TIMEOUT))
+
+while (( SECONDS < deadline )); do
+    response="$(curl -sS --max-time 3 -w $'\n%{http_code}' "$API/v1/models" 2>/dev/null || true)"
+    http_status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    if [[ "$http_status" == "200" ]] && MODEL_RESPONSE="$body" EXPECTED_ALIAS="$ALIAS" python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ["MODEL_RESPONSE"])
+    models = payload.get("data")
+    aliases = {item.get("id") for item in models if isinstance(item, dict)}
+    raise SystemExit(0 if isinstance(models, list) and aliases and os.environ["EXPECTED_ALIAS"] in aliases else 1)
+except (json.JSONDecodeError, KeyError, AttributeError, TypeError):
+    raise SystemExit(1)
+PY
+    then
+        echo "Maya llama-server ready at $API with model $ALIAS." >&2
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "Maya llama-server did not become ready within ${TIMEOUT}s at $API." >&2
+exit 1

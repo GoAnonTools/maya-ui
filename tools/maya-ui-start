@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="/home/theanarchitect/maya-ui"
+PYTHON="$ROOT/.venv/bin/python"
+
+maya_running() {
+    pgrep -f "$ROOT/main.py" >/dev/null 2>&1
+}
+
+if maya_running; then
+    echo "Maya UI is already running; not starting a duplicate." >&2
+    trap 'exit 0' TERM INT
+    while maya_running; do
+        sleep 2
+    done
+    echo "Existing Maya UI exited; starting the managed instance." >&2
+fi
+
+exec "$PYTHON" "$ROOT/main.py"

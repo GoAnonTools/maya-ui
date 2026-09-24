@@ -1,0 +1,10 @@
+[
+  {
+    "id": "ministral_14b",
+    "friendly_name": "Ministral 14B",
+    "provider_type": "openai_compatible",
+    "model_name": "ministral-14b-latest",
+    "base_url": "https://api.mistral.ai/v1",
+    "credential_ref": "maya.provider.ministral_14b.api_key"
+  }
+]

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -u
+
+APP_ID="io.github.qwersyk.Newelle"
+LOCK_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+
+app_pid() {
+    flatpak ps --columns=pid,application 2>/dev/null |
+        awk -v app="$APP_ID" '$2 == app { print $1; exit }'
+}
+
+app_running() {
+    [[ -n "$(app_pid)" ]]
+}
+
+# Serialize startup so two login/manual starts cannot pass the check together.
+exec 9>"$LOCK_DIR/maya-newelle-start.lock"
+flock -x 9
+
+if app_running; then
+    echo "Newelle is already running; not starting a duplicate." >&2
+    trap 'exit 0' TERM INT
+    while app_running; do
+        sleep 2
+    done
+    echo "Existing Newelle exited; starting the managed instance." >&2
+fi
+
+exec flatpak run "$APP_ID"
