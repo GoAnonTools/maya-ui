@@ -354,10 +354,31 @@ class MayaController(QObject):
         self.assistantTextChanged.emit()
         self._submit_request(text, "", self._chat_id, "en", "typed")
 
+    @staticmethod
+    def _is_stop_command(text: str) -> bool:
+        """Recognize explicit stop/cancel commands."""
+        if not isinstance(text, str) or not text.strip():
+            return False
+        value = text.strip().casefold()
+        value = re.sub(r"^(?:maya[, ]+)?(?:please\s+)?", "", value).strip()
+        value = re.sub(r"[.!?]+$", "", value).strip()
+        return value in {"stop", "cancel", "quiet", "shut up", "halt"}
+
+    def _handle_stop_command(self, user_text: str) -> bool:
+        if self._is_stop_command(user_text):
+            log.info("Stop command intercepted user_text=%r", user_text)
+            self.cancel_active_task()
+            return True
+        return False
+
     def _submit_request(self, user_text, language_instruction, chat_id, language, source):
         """Route explicit memory actions locally, otherwise submit with bounded context."""
+        if self._handle_stop_command(user_text):
+            return
+
         if self._handle_memory_input(user_text):
             return
+
 
         local_reply = local_skill_response(user_text, mcp_client=self._mcp_client)
         if local_reply is not None:

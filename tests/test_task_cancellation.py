@@ -117,6 +117,48 @@ class TestMayaControllerCancellation(unittest.TestCase):
         self.assertEqual(controller.state, "idle")
         self.assertEqual(controller._chat_id, 12345)
 
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_stop_command_cancels_active_task_and_bypasses_llm(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._chat_id = 999
+        controller._request_active = True
+        controller.set_state("thinking")
+
+        mock_worker = MagicMock()
+        controller._llm_worker = mock_worker
+
+        with patch.object(controller, "_start_provider_request") as mock_start_req:
+            for phrase in ["maya stop", "stop", "please cancel", "MAYA CANCEL!", "shut up"]:
+                controller._request_active = True
+                controller.set_state("thinking")
+
+                controller.submit(phrase)
+
+                mock_worker.cancel.assert_called()
+                controller._tts.stop.assert_called()
+                self.assertFalse(controller._request_active)
+                self.assertEqual(controller.state, "idle")
+                self.assertEqual(controller._chat_id, 999)
+                mock_start_req.assert_not_called()
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_normal_request_reaches_llm(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._chat_id = 555
+
+        with patch.object(controller, "_start_provider_request", return_value=True) as mock_start_req:
+            controller.submit("What is the capital of France?")
+
+            mock_start_req.assert_called_once()
+            self.assertEqual(controller._chat_id, 555)
+
 
 if __name__ == "__main__":
     unittest.main()
+
