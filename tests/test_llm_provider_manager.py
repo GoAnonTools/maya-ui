@@ -139,7 +139,7 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(list(manager.submit(LLMRequest(messages=()))), [LLMTextDelta("next provider")])
 
     def test_smoke_test_normalized_events_can_be_delivered_to_controller(self):
-        from test_memory_controller import FakeMemory, make_controller
+        from .test_memory_controller import FakeMemory, make_controller
         from backend.llm import LLMCompleted
 
         class FakeResponse:

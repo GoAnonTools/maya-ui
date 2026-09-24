@@ -23,10 +23,18 @@ Window {
     }
     MayaWorkspace { id: workspace }
 
-    // The companion moves into the workspace rather than being duplicated.
+    // The compact root window hides when the workspace window is active.
     Connections {
         target: workspace
-        function onVisibleChanged() { mayaWindow.visible = !workspace.visible }
+        function onVisibleChanged() {
+            if (workspace.visible) {
+                root.visible = false
+            } else {
+                root.visible = true
+                root.raise()
+                root.requestActivate()
+            }
+        }
     }
 
     Shortcut { sequence: "1"; onActivated: mayaController.set_demo_state(1) }
