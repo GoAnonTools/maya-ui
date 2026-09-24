@@ -220,15 +220,17 @@ class MayaController(QObject):
             self._wake_timeout_timer.stop()
         self._wake_timeout_started_at = None
 
-    def _start_wake_timeout(self) -> None:
+    def _start_wake_timeout(self, duration: float | None = None) -> None:
         self._cancel_wake_timeout("restart")
-        duration = self._wake_command_timeout_seconds
+        if duration is None:
+            duration = self._wake_command_timeout_seconds
         if duration <= 0:
             log.warning("WAKE_DEBUG wake command timeout disabled duration=%.3fs", duration)
             return
         self._wake_timeout_started_at = time.monotonic()
         log.warning("WAKE_DEBUG wake command timeout started timestamp=%.6f duration=%.3fs", self._wake_timeout_started_at, duration)
         self._wake_timeout_timer.start(round(duration * 1000))
+
 
     @Slot()
     def _on_wake_timeout(self) -> None:
@@ -367,9 +369,16 @@ class MayaController(QObject):
     def _handle_stop_command(self, user_text: str) -> bool:
         if self._is_stop_command(user_text):
             log.info("Stop command intercepted user_text=%r", user_text)
-            self.cancel_active_task()
+            if self._llm_worker is not None:
+                self._llm_worker.cancel()
+            self._tts.stop()
+            self._stt.cancel()
+            self._request_active = False
+            self.set_state("listening")
+            self._start_wake_timeout(5.0)
             return True
         return False
+
 
     def _submit_request(self, user_text, language_instruction, chat_id, language, source):
         """Route explicit memory actions locally, otherwise submit with bounded context."""
@@ -747,9 +756,10 @@ class MayaController(QObject):
     @Slot()
     def _on_wake_detected(self):
         log.warning("WAKE_DEBUG event received by controller: wake detected state=%s", self._state)
-        if self._state not in {"idle", "speaking"}:
+        if self._state not in {"idle", "thinking", "speaking"}:
             log.warning("WAKE_DEBUG wake event ignored because controller state=%s", self._state)
             return
+
         # Invalidate controller-side callbacks as well as the TTS provider's
         # generation. This covers queued Qt signals from the interrupted audio.
         self._tts.stop()

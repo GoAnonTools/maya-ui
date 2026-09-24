@@ -121,7 +121,8 @@ class TestMayaControllerCancellation(unittest.TestCase):
     @patch("backend.maya_controller.STTManager")
     @patch("backend.maya_controller.TTSManager")
     @patch("backend.maya_controller.MemoryService")
-    def test_stop_command_cancels_active_task_and_bypasses_llm(self, mock_mem, mock_tts, mock_stt, mock_wake):
+    def test_stop_command_cancels_active_task_and_enters_5s_listening(self, mock_mem, mock_tts, mock_stt, mock_wake):
+
         controller = MayaController(memory_service=mock_mem.return_value)
         controller._chat_id = 999
         controller._request_active = True
@@ -140,9 +141,14 @@ class TestMayaControllerCancellation(unittest.TestCase):
                 mock_worker.cancel.assert_called()
                 controller._tts.stop.assert_called()
                 self.assertFalse(controller._request_active)
-                self.assertEqual(controller.state, "idle")
+                self.assertEqual(controller.state, "listening")
+                self.assertTrue(controller._wake_timeout_timer.isActive())
                 self.assertEqual(controller._chat_id, 999)
                 mock_start_req.assert_not_called()
+
+            # Timeout after 5 seconds returns to idle
+            controller._on_wake_timeout()
+            self.assertEqual(controller.state, "idle")
 
     @patch("backend.maya_controller.WakeManager")
     @patch("backend.maya_controller.STTManager")
@@ -159,6 +165,26 @@ class TestMayaControllerCancellation(unittest.TestCase):
             self.assertEqual(controller._chat_id, 555)
 
 
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_wake_detected_allowed_in_thinking_idle_and_speaking_states(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+
+        for initial_state in ["idle", "thinking", "speaking"]:
+            controller.set_state(initial_state)
+            controller._on_wake_detected()
+            self.assertEqual(controller.state, "listening")
+
+        # In error state, wake detection should be ignored
+        controller.set_state("error")
+        controller._on_wake_detected()
+        self.assertEqual(controller.state, "error")
+
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

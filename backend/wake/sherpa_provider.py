@@ -156,7 +156,8 @@ class SherpaProvider:
             if not all(path.exists() for path in (encoder, decoder, joiner, KEYWORDS)):
                 raise RuntimeError("sherpa-onnx wake model is missing")
             # Higher sensitivity means a lower sherpa trigger threshold.
-            threshold = max(0.10, min(0.80, 0.85 - float(sensitivity) * 0.60))
+            threshold = max(0.08, min(0.80, 0.65 - float(sensitivity) * 0.50))
+
             input_source = selected_source()
             kws = KeywordSpotter(
                 tokens=str(MODEL_ROOT / "tokens.txt"), encoder=str(encoder), decoder=str(decoder),
@@ -201,8 +202,9 @@ class SherpaProvider:
                 raw_mean = float(np.mean(audio))
                 centered = audio - raw_mean
                 centered_peak = float(np.max(np.abs(centered)))
-                gain = 1.0 if centered_peak < 1.0e-6 else min(4.0, 0.5 / centered_peak)
+                gain = 1.0 if centered_peak < 1.0e-6 else min(20.0, 0.5 / max(centered_peak, 1.0e-4))
                 audio = np.clip(centered * gain, -1.0, 1.0).astype(np.float32, copy=False)
+
                 with self._lock:
                     paused = self._paused
                 if paused and not command_mode:
