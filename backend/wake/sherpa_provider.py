@@ -186,6 +186,10 @@ class SherpaProvider:
             while self._current(generation) and process.stdout is not None:
                 raw = process.stdout.read(FRAME_SAMPLES * 4)
                 if not raw:
+                    with self._lock:
+                        paused = self._paused
+                    if self._current(generation) and not paused:
+                        raise RuntimeError("audio capture stream closed unexpectedly")
                     break
                 audio = np.frombuffer(raw, dtype=np.float32)
                 if audio.size != FRAME_SAMPLES:
