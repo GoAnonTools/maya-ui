@@ -132,19 +132,31 @@ class NewelleWorker(QObject):
                             self.textChanged.emit(clean_user_text(accumulated))
                     elif name == "error":
                         log.warning("WAKE_DEBUG response LLM error event data=%r accumulated=%r", data, accumulated)
-                        self._fail("Assistant failed")
+                        error_msg = str(data) if data is not None else ""
+                        if "context" in error_msg.lower() and "exceeded" in error_msg.lower():
+                            self._fail("Context size has been exceeded")
+                        else:
+                            self._fail("Assistant failed")
                         return
                     elif name == "done":
                         if not self._failed:
                             log.warning("WAKE_DEBUG response Newelle done final_accumulated=%r", accumulated)
                             self.completed.emit()
                         return
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError):
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as exc:
             log.exception("WAKE_DEBUG response Newelle integration exception")
-            self._fail("Newelle unavailable")
-        except Exception:
+            exc_msg = str(exc)
+            if "context" in exc_msg.lower() and "exceeded" in exc_msg.lower():
+                self._fail("Context size has been exceeded")
+            else:
+                self._fail("Newelle unavailable")
+        except Exception as exc:
             log.exception("WAKE_DEBUG response Newelle unexpected exception")
-            self._fail("Assistant failed")
+            exc_msg = str(exc)
+            if "context" in exc_msg.lower() and "exceeded" in exc_msg.lower():
+                self._fail("Context size has been exceeded")
+            else:
+                self._fail("Assistant failed")
 
 
 class NewelleClient(QObject):

@@ -52,6 +52,9 @@ def language_prompt(text: str, language: str) -> str:
     return f"[Language policy: answer in {names.get(language, 'English')}. Use natural, concise spoken language.]\n\n{text}"
 
 
+RECOVERY_NOTICE = "My conversation memory became too large, so I refreshed my short-term context while keeping the important things."
+
+
 class MayaController(QObject):
     stateChanged = Signal()
     detailChanged = Signal()
@@ -77,7 +80,55 @@ class MayaController(QObject):
         self._stt_generation = 0
         self._wake_command_path = None
         self._wake_command_timeout_seconds = self._load_wake_command_timeout()
+        self._context_size = self._load_context_size()
         self._memory = memory_service if memory_service is not None else MemoryService.from_config()
+        self._pending_recovery_notice = False
+
+    @staticmethod
+    def _load_context_size(config_path: Path | None = None) -> int:
+        if config_path is None:
+            config_path = Path.home() / ".config" / "maya" / "llm.json"
+        default = 8192
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "context_size" in data:
+                return max(512, int(data["context_size"]))
+            return default
+        except (OSError, TypeError, ValueError):
+            return default
+
+    @property
+    def context_size(self) -> int:
+        if not hasattr(self, "_context_size"):
+            self._context_size = self._load_context_size()
+        return self._context_size
+
+    def estimate_context_usage(
+        self, prompt: str, history_messages: list[dict] | tuple | None = None, history_chars: int = 0
+    ) -> dict:
+        """Estimate current context size and ratio relative to configured limit without calling LLM."""
+        prompt_chars = len(prompt or "")
+        calc_history_chars = history_chars
+        if history_messages is not None:
+            calc_history_chars = sum(
+                len(msg.get("Message", "")) if isinstance(msg, dict) and isinstance(msg.get("Message"), str) else 0
+                for msg in history_messages
+            )
+        total_chars = prompt_chars + calc_history_chars
+        estimated_tokens = (total_chars + 3) // 4  # ~4 characters per token
+        max_tokens = self.context_size
+        max_chars = max_tokens * 4
+        ratio = total_chars / max_chars if max_chars > 0 else 0.0
+        return {
+            "prompt_chars": prompt_chars,
+            "history_chars": calc_history_chars,
+            "total_chars": total_chars,
+            "estimated_tokens": estimated_tokens,
+            "max_context_tokens": max_tokens,
+            "max_context_chars": max_chars,
+            "usage_ratio": round(ratio, 4),
+            "is_approaching_limit": ratio >= 0.75,
+        }
         self._pending_memory_action = None
         self._wake_timeout_started_at = None
         self._wake_timeout_timer = QTimer(self)
@@ -269,14 +320,33 @@ class MayaController(QObject):
                 log.exception("Memory retrieval failed; continuing without memory context")
 
         prompt = build_prompt(behaviour, language_instruction, memory_context, user_text)
+        usage = self.estimate_context_usage(prompt)
+        if usage.get("is_approaching_limit"):
+            log.warning(
+                "CONTEXT_GUARD context limit approaching chat_id=%r total_chars=%d estimated_tokens=%d max_tokens=%d usage_ratio=%.2f",
+                chat_id,
+                usage["total_chars"],
+                usage["estimated_tokens"],
+                usage["max_context_tokens"],
+                usage["usage_ratio"],
+            )
+            chat_id = self._perform_context_rollover(user_text, memory_context)
+
         self._request_active = True
         self._generation += 1
         self._tts.stop()
         self._tts_generation = self._tts.start_response(language)
         self.set_state("thinking")
         log.warning("WAKE_DEBUG response LLM request sent source=%s text=%r prompt_chars=%d chat_id=%r tts_generation=%d", source, user_text, len(prompt), chat_id, self._tts_generation)
-        if not self._start_provider_request(prompt, None):
+        if not self._start_provider_request(prompt, chat_id):
             self._on_failed("Assistant busy")
+
+    def _perform_context_rollover(self, user_text: str, memory_context) -> None:
+        """Reset short-term context while preserving long-term memories and attaching recovery notice."""
+        log.warning("CONTEXT_ROLLOVER resetting short-term chat context chat_id=%r", self._chat_id)
+        self._chat_id = None
+        self._pending_recovery_notice = True
+        return None
 
     def _start_provider_request(self, prompt, chat_id) -> bool:
         if self._llm_thread is not None and self._llm_thread.isRunning():
@@ -319,7 +389,11 @@ class MayaController(QObject):
         elif isinstance(event, LLMState):
             self.set_state(event.state, event.detail)
         elif isinstance(event, LLMTextDelta):
-            text = event.text if event.replace else self._assistant_text + event.text
+            prefix = ""
+            if getattr(self, "_pending_recovery_notice", False):
+                self._pending_recovery_notice = False
+                prefix = f"{RECOVERY_NOTICE}\n\n"
+            text = (prefix + event.text) if event.replace or not self._assistant_text else (self._assistant_text + event.text)
             self._on_assistant_text(text)
             if self._request_active:
                 self._tts.feed_response(text, replace=event.replace)
@@ -496,6 +570,19 @@ class MayaController(QObject):
     @Slot(str)
     def _on_failed(self, detail):
         log.error("WAKE_DEBUG controller error transition source=LLM/Newelle detail=%r", detail)
+        if "context" in detail.lower() and "exceeded" in detail.lower():
+            if not getattr(self, "_is_overflow_retrying", False):
+                log.warning("REACTIVE_RECOVERY context overflow detected, performing context reset and retrying request chat_id=%r", self._chat_id)
+                self._is_overflow_retrying = True
+                self._chat_id = None
+                self._pending_recovery_notice = True
+                self._request_active = False
+                try:
+                    self._submit_request(self._user_text, "", None, "en", "retry")
+                finally:
+                    self._is_overflow_retrying = False
+                return
+
         log.error("WAKE_DEBUG controller user-facing error detail retained friendly_label=%r", self._details["error"])
         self._request_active = False
         self._tts.stop()

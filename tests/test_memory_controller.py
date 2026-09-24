@@ -465,6 +465,86 @@ class MemoryControllerTests(unittest.TestCase):
         self.assertEqual(memory.forgotten, [])
         self.assertEqual(memory.cleared, 0)
 
+    def test_context_size_configuration_and_estimation(self):
+        controller = make_controller(FakeMemory())
+        # Default fallback context_size
+        self.assertEqual(controller._load_context_size(Path("/nonexistent/path/llm.json")), 8192)
+
+        # Estimation without history
+        usage = controller.estimate_context_usage("Hello world")
+        self.assertEqual(usage["prompt_chars"], 11)
+        self.assertEqual(usage["history_chars"], 0)
+        self.assertEqual(usage["total_chars"], 11)
+        self.assertEqual(usage["estimated_tokens"], 3)
+        self.assertEqual(usage["max_context_tokens"], 8192)
+        self.assertEqual(usage["max_context_chars"], 32768)
+        self.assertFalse(usage["is_approaching_limit"])
+
+        # Estimation with history messages
+        history = [
+            {"User": "User", "Message": "A" * 10000},
+            {"User": "Assistant", "Message": "B" * 15000},
+        ]
+        large_usage = controller.estimate_context_usage("C" * 1000, history_messages=history)
+        self.assertEqual(large_usage["prompt_chars"], 1000)
+        self.assertEqual(large_usage["history_chars"], 25000)
+        self.assertEqual(large_usage["total_chars"], 26000)
+        self.assertEqual(large_usage["estimated_tokens"], 6500)
+        self.assertTrue(large_usage["is_approaching_limit"])
+
+    def test_context_safety_detection_logs_warning_when_approaching_limit(self):
+        controller = make_controller(FakeMemory())
+        controller._context_size = 1000  # 4000 max chars
+        with self.assertLogs("maya-ui.controller", level="WARNING") as cm:
+            controller._submit_request("X" * 3100, "", 17, "en", "typed")
+            wait_for_requests(controller)
+        self.assertTrue(any("CONTEXT_GUARD context limit approaching" in log_msg for log_msg in cm.output))
+
+    def test_context_rollover_resets_chat_id_and_attaches_recovery_notice(self):
+        controller = make_controller(FakeMemory())
+        controller._context_size = 1000  # 4000 max chars (75% limit = 3000 chars)
+        controller._test_provider.events = (
+            LLMConversation(99),
+            LLMState("thinking", ""),
+            LLMTextDelta("LLM answer text"),
+            LLMCompleted("stop"),
+        )
+        controller._chat_id = 17
+        controller._submit_request("Y" * 3100, "", 17, "en", "typed")
+        wait_for_requests(controller)
+
+        # The request to provider should have passed chat_id=None due to rollover
+        prompt, chat_id = controller._test_provider.requests[0]
+        self.assertIsNone(chat_id)
+        # Assistant response should contain the recovery notice prefix
+        self.assertIn("My conversation memory became too large", controller._assistant_text)
+        self.assertIn("LLM answer text", controller._assistant_text)
+
+    def test_reactive_error_recovery_resets_chat_id_and_retries_once(self):
+        controller = make_controller(FakeMemory())
+        controller._chat_id = 88
+        controller._user_text = "What is quantum computing?"
+
+        # Simulate provider returning context overflow error on first attempt
+        controller._on_failed("Context size has been exceeded")
+        wait_for_requests(controller)
+
+        # Confirm chat_id was reset to None for the retry
+        self.assertGreaterEqual(len(controller._test_provider.requests), 1)
+        prompt, chat_id = controller._test_provider.requests[-1]
+        self.assertIsNone(chat_id)
+        self.assertTrue(controller._pending_recovery_notice)
+
+    def test_reactive_error_recovery_limits_retry_to_single_attempt(self):
+        controller = make_controller(FakeMemory())
+        controller._chat_id = 88
+        controller._user_text = "What is quantum computing?"
+        controller._is_overflow_retrying = True
+
+        # When _is_overflow_retrying is already True, _on_failed must transition to error state
+        controller._on_failed("Context size has been exceeded")
+        self.assertEqual(controller.states_seen[-1], ("error", "Context size has been exceeded"))
+
 
 if __name__ == "__main__":
     unittest.main()

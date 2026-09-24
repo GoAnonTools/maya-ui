@@ -112,13 +112,15 @@ class NewelleProviderTests(unittest.TestCase):
         self.assertEqual(errors[0].code, "provider")
         self.assertFalse(errors[0].retryable)
 
-    def test_rejects_requests_without_a_user_message(self):
-        provider = NewelleProvider(client=FakeNewelleClient())
+    def test_normalizes_context_overflow_failure_code_and_retryable(self):
+        provider = NewelleProvider(client=FakeNewelleClient(failure="Context size has been exceeded"))
+        request = LLMRequest(messages=(LLMMessage(role="user", content="Hello"),))
 
-        with self.assertRaises(LLMProviderError) as caught:
-            list(provider.stream(LLMRequest(messages=(LLMMessage(role="system", content="policy"),))))
+        _, errors = self.collect_stream(provider, request)
 
-        self.assertEqual(caught.exception.code, "invalid_request")
+        self.assertEqual(str(errors[0]), "Context size has been exceeded")
+        self.assertEqual(errors[0].code, "context_overflow")
+        self.assertTrue(errors[0].retryable)
 
 
 if __name__ == "__main__":

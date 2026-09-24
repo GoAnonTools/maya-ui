@@ -131,8 +131,11 @@ class NewelleProvider(QObject):
 
     @Slot(str)
     def _on_failed(self, detail: str) -> None:
-        code = "connection" if detail == "Newelle unavailable" else "provider"
-        error = LLMProviderError(code, detail, provider=self.name, retryable=(code == "connection"))
+        if "context" in detail.lower() and "exceeded" in detail.lower():
+            code = "context_overflow"
+        else:
+            code = "connection" if detail == "Newelle unavailable" else "provider"
+        error = LLMProviderError(code, detail, provider=self.name, retryable=(code in {"connection", "context_overflow"}))
         with self._events_lock:
             events = self._active_events
         if events is not None:

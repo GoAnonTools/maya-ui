@@ -19,6 +19,7 @@ LLMErrorCode: TypeAlias = Literal[
     "invalid_request",
     "unsupported_capability",
     "provider",
+    "context_overflow",
 ]
 
 
