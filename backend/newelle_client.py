@@ -61,7 +61,7 @@ class NewelleWorker(QObject):
         self.chat_id = chat_id
         self._failed = False
 
-    def _request(self, path: str, method: str = "GET", payload: Any = None):
+    def _request(self, path: str, method: str = "GET", payload: Any = None, timeout: float = 20.0):
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             API_ROOT + path,
@@ -69,7 +69,7 @@ class NewelleWorker(QObject):
             method=method,
             headers={"Content-Type": "application/json"},
         )
-        return urllib.request.urlopen(request, timeout=20)
+        return urllib.request.urlopen(request, timeout=timeout)
 
     def _prepare_chat(self) -> int:
         chat_id = self.chat_id
@@ -101,14 +101,17 @@ class NewelleWorker(QObject):
             chat_id = self._prepare_chat()
             self.chatReady.emit(chat_id)
             accumulated = ""
-            with self._request(f"/api/chats/{chat_id}/stream") as response:
+            with self._request(f"/api/chats/{chat_id}/stream", timeout=120.0) as response:
                 log.warning("WAKE_DEBUG response Newelle stream opened chat_id=%d", chat_id)
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                    if not line.startswith("data: "):
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str:
                         continue
                     try:
-                        event = json.loads(line[6:])
+                        event = json.loads(data_str)
                     except (TypeError, ValueError):
                         self._fail("Assistant failed")
                         return
