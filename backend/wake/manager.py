@@ -130,12 +130,11 @@ class WakeManager(QObject):
 
     def _execute_recovery(self) -> None:
         with self._lifecycle_lock:
-            armed = self._armed
-        if not armed or not self.enabled:
-            log.info("Wake execute_recovery skipped: no longer armed or enabled")
-            return
-        log.info("Wake executing recovery attempt")
-        self._provider.start(self.sensitivity, _Callbacks(self))
+            if not self._armed or not self.enabled:
+                log.info("Wake execute_recovery skipped: no longer armed or enabled")
+                return
+            log.info("Wake executing recovery attempt")
+            self._provider.start(self.sensitivity, _Callbacks(self))
 
     @property
     def enabled(self) -> bool:

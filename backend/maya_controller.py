@@ -53,6 +53,7 @@ def language_prompt(text: str, language: str) -> str:
 
 
 RECOVERY_NOTICE = "My conversation memory became too large, so I refreshed my short-term context while keeping the important things."
+DEFAULT_LLM_WATCHDOG_INTERVAL_SECONDS = 180.0
 
 
 class MayaController(QObject):
@@ -133,6 +134,8 @@ class MayaController(QObject):
         # queued _on_wake_command slot and silently discard a command the
         # user did finish speaking (audit P2).
         self._wake_command_pending = False
+        self._wake_generation = 0
+        self._wake_timeout_token = 0
         self._wake_command_timeout_seconds = self._load_wake_command_timeout()
         self._context_size = self._load_context_size()
         self._memory = memory_service if memory_service is not None else MemoryService.from_config()
@@ -142,6 +145,10 @@ class MayaController(QObject):
         self._wake_timeout_timer = QTimer(self)
         self._wake_timeout_timer.setSingleShot(True)
         self._wake_timeout_timer.timeout.connect(self._on_wake_timeout)
+        self._llm_watchdog_started_at = None
+        self._llm_watchdog_timer = QTimer(self)
+        self._llm_watchdog_timer.setSingleShot(True)
+        self._llm_watchdog_timer.timeout.connect(self._on_llm_watchdog_timeout)
         self._provider_manager = provider_manager or create_default_provider_manager(self)
         self._mcp_client = mcp_client or MCPStdioClient()
         self._llm_thread = None
@@ -221,27 +228,16 @@ class MayaController(QObject):
             return default
 
     def _cancel_wake_timeout(self, reason: str) -> None:
-        if self._wake_timeout_timer.isActive():
-            elapsed = time.monotonic() - self._wake_timeout_started_at if self._wake_timeout_started_at is not None else 0.0
+        self._wake_command_pending = False
+        if hasattr(self, "_wake_timeout_timer") and self._wake_timeout_timer.isActive():
+            elapsed = time.monotonic() - self._wake_timeout_started_at if getattr(self, "_wake_timeout_started_at", None) is not None else 0.0
             log.warning("WAKE_DEBUG wake command timeout canceled reason=%s elapsed=%.3fs", reason, elapsed)
             self._wake_timeout_timer.stop()
         self._wake_timeout_started_at = None
 
     def _release_wake_command(self, reason: str) -> None:
-        """Release the pending wake-command temp WAV (if any) and clear the path.
-
-        The wake provider's release_command is idempotent (unlink(missing_ok=True)),
-        so this is safe to call even when the path has already been released.
-
-        Every code path that invalidates self._stt_generation (or overwrites
-        self._wake_command_path with a new path) MUST call this first. Without it,
-        the stale STT callback that would normally release the path (in
-        _on_stt_transcript / _on_stt_failed) is silently dropped because
-        generation != self._stt_generation, and the temp WAV leaks on disk
-        with self._wake_command_path left pointing at a file that no longer
-        exists (audit P1).
-        """
-        if self._wake_command_path is not None:
+        """Release the pending wake-command temp WAV (if any) and clear the path."""
+        if getattr(self, "_wake_command_path", None) is not None:
             log.warning("WAKE_DEBUG releasing stale wake command path=%s reason=%s", self._wake_command_path, reason)
             try:
                 self._wake.release_command(self._wake_command_path)
@@ -252,34 +248,35 @@ class MayaController(QObject):
     def _start_wake_timeout(self, duration: float | None = None) -> None:
         self._cancel_wake_timeout("restart")
         if duration is None:
-            duration = self._wake_command_timeout_seconds
+            duration = getattr(self, "_wake_command_timeout_seconds", 8.0)
         if duration <= 0:
             log.warning("WAKE_DEBUG wake command timeout disabled duration=%.3fs", duration)
             return
         self._wake_timeout_started_at = time.monotonic()
-        log.warning("WAKE_DEBUG wake command timeout started timestamp=%.6f duration=%.3fs", self._wake_timeout_started_at, duration)
-        self._wake_timeout_timer.start(round(duration * 1000))
+        self._wake_timeout_token = getattr(self, "_wake_generation", 0)
+        log.warning("WAKE_DEBUG wake command timeout started timestamp=%.6f duration=%.3fs token=%d", self._wake_timeout_started_at, duration, self._wake_timeout_token)
+        if hasattr(self, "_wake_timeout_timer"):
+            self._wake_timeout_timer.start(round(duration * 1000))
 
 
     @Slot()
     def _on_wake_timeout(self) -> None:
-        started_at = self._wake_timeout_started_at
-        self._wake_timeout_started_at = None
+        started_at = getattr(self, "_wake_timeout_started_at", None)
         elapsed = time.monotonic() - started_at if started_at is not None else 0.0
-        log.warning("WAKE_DEBUG wake command timeout expired elapsed=%.3fs state=%s request_active=%s", elapsed, self._state, self._request_active)
-        if self._state == "listening" and not self._request_active and self._wake_command_path is None:
-            # Race guard: if a wake command was detected (arming this timer)
-            # but _on_wake_command hasn't run yet, the command audio might
-            # still be in flight from the wake engine's background thread.
-            # Rather than silently dropping the command by transitioning to
-            # idle, grant a one-time grace reprieve so the queued
-            # _on_wake_command slot gets a chance to run on the next event
-            # loop iteration. The flag is cleared here so the next timeout
-            # fires unconditionally (audit P2).
-            if self._wake_command_pending:
+        pending = getattr(self, "_wake_command_pending", False)
+        self._wake_timeout_started_at = None
+        state = getattr(self, "_state", "idle")
+        request_active = getattr(self, "_request_active", False)
+        log.warning("WAKE_DEBUG wake command timeout expired elapsed=%.3fs state=%s request_active=%s", elapsed, state, request_active)
+        if state == "listening" and not request_active and getattr(self, "_wake_command_path", None) is None:
+            token = getattr(self, "_wake_timeout_token", 0)
+            generation = getattr(self, "_wake_generation", 0)
+            if token == generation and pending:
                 log.warning("WAKE_DEBUG wake command timeout grace reprieve granted — command may still be in flight")
                 self._wake_command_pending = False
-                self._start_wake_timeout(1.0)
+                # Reprieve duration is proportional to configured wake command timeout and bounded between 1.0s and 3.0s.
+                reprieve_duration = min(3.0, max(1.0, getattr(self, "_wake_command_timeout_seconds", 8.0) * 0.25))
+                self._start_wake_timeout(reprieve_duration)
                 return
             log.warning("WAKE_DEBUG wake command timeout transitioning state listening -> idle")
             # Stop STT if it was armed for the post-stop 5-second follow-up
@@ -291,6 +288,35 @@ class MayaController(QObject):
             # (audit P1).
             self._stt.cancel()
             self.set_state("idle")
+
+    def _stop_llm_watchdog(self) -> None:
+        if hasattr(self, "_llm_watchdog_timer") and self._llm_watchdog_timer.isActive():
+            self._llm_watchdog_timer.stop()
+        self._llm_watchdog_started_at = None
+
+    def _start_llm_watchdog(self, duration: float | None = None) -> None:
+        self._stop_llm_watchdog()
+        if duration is None:
+            duration = getattr(self, "_llm_watchdog_interval_seconds", DEFAULT_LLM_WATCHDOG_INTERVAL_SECONDS)
+        if duration <= 0:
+            return
+        self._llm_watchdog_started_at = time.monotonic()
+        if hasattr(self, "_llm_watchdog_timer"):
+            self._llm_watchdog_timer.start(round(duration * 1000))
+
+    @Slot()
+    def _on_llm_watchdog_timeout(self) -> None:
+        started_at = getattr(self, "_llm_watchdog_started_at", None)
+        elapsed = time.monotonic() - started_at if started_at is not None else 0.0
+        log.warning("LLM worker watchdog timeout expired elapsed=%.3fs state=%s request_active=%s", elapsed, getattr(self, "_state", "idle"), getattr(self, "_request_active", False))
+        self._stop_llm_watchdog()
+        if getattr(self, "_llm_worker", None) is not None:
+            try:
+                self._llm_worker.cancel()
+            except Exception:
+                log.exception("LLM watchdog: worker cancel failed")
+        self._request_active = False
+        self.set_state("idle")
 
     def _get_state(self):
         return self._state
@@ -467,11 +493,15 @@ class MayaController(QObject):
         except Exception:
             log.exception("shutdown: wake stop failed")
 
-        # 6. Cancel the wake timeout timer so it doesn't fire after teardown.
+        # 6. Cancel the wake timeout timer and LLM watchdog timer so they don't fire after teardown.
         try:
             self._cancel_wake_timeout("shutdown")
         except Exception:
             log.exception("shutdown: wake timeout cancel failed")
+        try:
+            self._stop_llm_watchdog()
+        except Exception:
+            log.exception("shutdown: LLM watchdog stop failed")
 
         self._request_active = False
         log.info("Maya shutdown complete")
@@ -544,6 +574,7 @@ class MayaController(QObject):
             # reprieve if it fires. Without this, a stale True from a previous
             # wake detection could cause the 5s window to extend by 1s for
             # no reason (audit P2 defensive clear).
+            self._wake_generation += 1
             self._wake_command_pending = False
             self._start_wake_timeout(5.0)
             return True
@@ -648,10 +679,12 @@ class MayaController(QObject):
         self._llm_thread = thread
         self._llm_worker = worker
         thread.start()
+        self._start_llm_watchdog()
         return True
 
     @Slot()
     def _on_llm_thread_finished(self):
+        self._stop_llm_watchdog()
         if self.sender() is self._llm_thread:
             self._llm_thread = None
             self._llm_worker = None
@@ -845,6 +878,7 @@ class MayaController(QObject):
 
     @Slot()
     def _on_completed(self):
+        self._stop_llm_watchdog()
         log.warning("WAKE_DEBUG response LLM completed assistant_text=%r request_active=%s tts_response_active=%s tts_speaking=%s", self._assistant_text, self._request_active, self._tts.response_active, self._tts.is_speaking)
         self._request_active = False
         self._tts.finish_response()
@@ -853,6 +887,7 @@ class MayaController(QObject):
 
     @Slot(str)
     def _on_failed(self, detail):
+        self._stop_llm_watchdog()
         log.error("WAKE_DEBUG controller error transition source=LLM/Newelle detail=%r", detail)
         if "context" in detail.lower() and "exceeded" in detail.lower():
             if not getattr(self, "_is_overflow_retrying", False):
@@ -926,11 +961,11 @@ class MayaController(QObject):
 
     @Slot(int, str)
     def _on_stt_transcript(self, generation, text):
-        log.warning("WAKE_DEBUG controller STT transcript callback generation=%d expected=%d text=%r", generation, self._stt_generation, text)
-        if generation != self._stt_generation:
+        log.warning("WAKE_DEBUG controller STT transcript callback generation=%d expected=%d text=%r", generation, getattr(self, "_stt_generation", 0), text)
+        if generation != getattr(self, "_stt_generation", 0):
             log.warning("WAKE_DEBUG controller ignoring stale STT transcript generation=%d", generation)
             return
-        if self._wake_command_path is not None:
+        if getattr(self, "_wake_command_path", None) is not None:
             self._wake.release_command(self._wake_command_path)
             self._wake_command_path = None
         text = text.strip()
@@ -944,22 +979,23 @@ class MayaController(QObject):
         language, confidence = detect_spoken_language(text)
         log.warning("WAKE_DEBUG language policy request=%r selected=%s confidence=%.2f", text, language, confidence)
         language_instruction = language_prompt("", language).strip()
-        self._submit_request(text, language_instruction, None if self._chat_id is None else self._chat_id, language, "STT")
+        self._submit_request(text, language_instruction, None if getattr(self, "_chat_id", None) is None else self._chat_id, language, "STT")
 
     @Slot(int, str)
     def _on_stt_failed(self, generation, detail):
-        log.warning("WAKE_DEBUG controller STT failure callback generation=%d expected=%d detail=%r", generation, self._stt_generation, detail)
-        if generation == self._stt_generation:
-            if self._wake_command_path is not None:
+        log.warning("WAKE_DEBUG controller STT failure callback generation=%d expected=%d detail=%r", generation, getattr(self, "_stt_generation", 0), detail)
+        if generation == getattr(self, "_stt_generation", 0):
+            if getattr(self, "_wake_command_path", None) is not None:
                 self._wake.release_command(self._wake_command_path)
                 self._wake_command_path = None
             self.set_state("error", detail[:120] or "Speech input failed")
 
     @Slot()
     def _on_wake_detected(self):
-        log.warning("WAKE_DEBUG event received by controller: wake detected state=%s", self._state)
-        if self._state not in {"idle", "thinking", "speaking"}:
-            log.warning("WAKE_DEBUG wake event ignored because controller state=%s", self._state)
+        state = getattr(self, "_state", "idle")
+        log.warning("WAKE_DEBUG event received by controller: wake detected state=%s", state)
+        if state not in {"idle", "thinking", "speaking"}:
+            log.warning("WAKE_DEBUG wake event ignored because controller state=%s", state)
             return
 
         # Cancel any in-flight LLM worker so its eventReady signals stop
@@ -968,7 +1004,7 @@ class MayaController(QObject):
         # and its stale output (LLMTextDelta, LLMState) lands out of sync with
         # whatever the user is doing by then. Mirrors _handle_stop_command /
         # cancel_active_task (audit P0 #2).
-        if self._llm_worker is not None:
+        if getattr(self, "_llm_worker", None) is not None:
             self._llm_worker.cancel()
         # _request_active must be cleared here, not just by _on_completed /
         # _on_failed, because cancellation suppresses both of those signals —
@@ -977,17 +1013,19 @@ class MayaController(QObject):
         self._request_active = False
 
         # Invalidate controller-side callbacks as well as the TTS provider's
-        # generation. This covers queued Qt signals from the interrupted audio.
-        self._tts.stop()
-        self._tts_generation += 1
+        # generation if speech was active. This covers queued Qt signals from the interrupted audio.
+        if hasattr(self, "_tts") and (state == "speaking" or getattr(self._tts, "is_speaking", False) is True):
+            self._tts.stop()
+        self._tts_generation = getattr(self, "_tts_generation", 0) + 1
         log.warning("WAKE_DEBUG controller setting listening state after wake detection")
         self.set_state("listening")
+        self._wake_generation = getattr(self, "_wake_generation", 0) + 1
         # Mark that a wake command is expected — _on_wake_timeout will grant
         # a one-time grace reprieve if it fires before _on_wake_command runs,
         # so we don't silently discard a command the user finished speaking
         # (audit P2).
-        self._wake_command_pending = True
         self._start_wake_timeout()
+        self._wake_command_pending = True
 
     @Slot(str)
     def _on_wake_command(self, path):

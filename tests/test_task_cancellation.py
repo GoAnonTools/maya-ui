@@ -2,7 +2,7 @@
 
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -245,6 +245,99 @@ class TestMayaControllerCancellation(unittest.TestCase):
         self.assertEqual(controller._assistant_text, "Initial text")
         self.assertEqual(controller.state, "idle")
         controller._tts.feed_response.assert_not_called()
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_wake_command_pending_lifecycle_and_timeout_reprieve(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        
+        # 1. Wake detected: sets _wake_command_pending = True and token = 1
+        controller._on_wake_detected()
+        self.assertTrue(controller._wake_command_pending)
+        self.assertEqual(controller._wake_generation, 1)
+        self.assertEqual(controller._wake_timeout_token, 1)
+        self.assertEqual(controller.state, "listening")
+
+        # 2. Timeout 1 expires while command is in flight:
+        # Reads _wake_command_pending (True), grants reprieve, sets _wake_command_pending = False, re-arms
+        controller._on_wake_timeout()
+        self.assertFalse(controller._wake_command_pending)
+        self.assertEqual(controller.state, "listening")
+
+        # 3. Timeout 2 expires (reprieve consumed):
+        # Reads _wake_command_pending (False), transitions listening -> idle
+        controller._on_wake_timeout()
+        self.assertEqual(controller.state, "idle")
+
+        # 4. _cancel_wake_timeout clears _wake_command_pending
+        controller._wake_command_pending = True
+        controller._cancel_wake_timeout("test")
+        self.assertFalse(controller._wake_command_pending)
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_wake_detected_tts_stop_conditional(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+
+        # Idle state: _tts.stop() should NOT be called
+        controller.set_state("idle")
+        type(controller._tts).is_speaking = PropertyMock(return_value=False)
+        controller._tts.stop.reset_mock()
+        controller._on_wake_detected()
+        controller._tts.stop.assert_not_called()
+
+        # Speaking state: _tts.stop() SHOULD be called
+        controller.set_state("speaking")
+        type(controller._tts).is_speaking = PropertyMock(return_value=True)
+        controller._tts.stop.reset_mock()
+        controller._on_wake_detected()
+        controller._tts.stop.assert_called_once()
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_stt_transcript_submits_regardless_of_state(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._stt_generation = 10
+
+        # State moved on to idle (e.g. timeout occurred)
+        controller.set_state("idle")
+
+        with patch.object(controller, "_submit_request") as mock_submit:
+            controller._on_stt_transcript(10, "Late transcript test")
+            mock_submit.assert_called_once()
+            self.assertEqual(mock_submit.call_args[0][0], "Late transcript test")
+
+
+    @patch("backend.maya_controller.WakeManager")
+    @patch("backend.maya_controller.STTManager")
+    @patch("backend.maya_controller.TTSManager")
+    @patch("backend.maya_controller.MemoryService")
+    def test_llm_watchdog_timer_lifecycle_and_timeout(self, mock_mem, mock_tts, mock_stt, mock_wake):
+        controller = MayaController(memory_service=mock_mem.return_value)
+        controller._request_active = True
+        controller.set_state("thinking")
+
+        mock_worker = MagicMock()
+        controller._llm_worker = mock_worker
+
+        # Start watchdog
+        controller._start_llm_watchdog(10.0)
+        self.assertTrue(controller._llm_watchdog_timer.isActive())
+
+        # Timeout fires
+        controller._on_llm_watchdog_timeout()
+
+        # Watchdog cancelled worker, set request_active = False, moved state to idle, and stopped timer
+        mock_worker.cancel.assert_called_once()
+        self.assertFalse(controller._request_active)
+        self.assertEqual(controller.state, "idle")
+        self.assertFalse(controller._llm_watchdog_timer.isActive())
 
 
 if __name__ == "__main__":

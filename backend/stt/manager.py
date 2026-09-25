@@ -76,11 +76,12 @@ class STTManager(QObject):
     def start(self) -> int | None:
         if not self.enabled:
             return None
-        self.cancel()
+        self._provider.cancel()
         with self._lock:
             self._generation += 1
             generation = self._generation
             self._listening = True
+        self.levelChanged.emit(0.0)
         device = selected_source()
         language = str(self._config.get("language", "auto"))
         model = str(self._config.get("model", "base"))
@@ -101,11 +102,12 @@ class STTManager(QObject):
         if not self.enabled:
             log.warning("WAKE_DEBUG STTManager transcribe_file skipped: STT disabled path=%s", path)
             return None
-        self.cancel()
+        self._provider.cancel()
         with self._lock:
             self._generation += 1
             generation = self._generation
             self._listening = True
+        self.levelChanged.emit(0.0)
         language = str(self._config.get("language", "auto"))
         model = str(self._config.get("model", "base"))
         log.warning("WAKE_DEBUG STTManager transcribe_file entry path=%s generation=%d model=%s language=%s", path, generation, model, language)
