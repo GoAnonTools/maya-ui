@@ -20,7 +20,10 @@ _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 
 def clean_user_text(text: str) -> str:
     text = _THINK_RE.sub("", text)
-    return _THINK_OPEN_RE.sub("", text).strip()
+    text = re.sub(r"^.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _THINK_OPEN_RE.sub("", text)
+    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE)
+    return text.strip()
 
 
 def speech_text(text: str) -> str:
