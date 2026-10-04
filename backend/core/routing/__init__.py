@@ -1,6 +1,7 @@
 """Immutable domain models for Maya Core routing decisions."""
 
 from .catalog import DEFAULT_PROVIDER_IDS, WorkerCatalog
+from .context import NetworkPolicy, PrivacyMode, RoutingContext, ToolPolicy
 from .registry import WorkerCapabilityRegistry
 from .models import (
     DelegationEvent,
@@ -23,4 +24,8 @@ __all__ = [
     "WorkerCapabilityRegistry",
     "DEFAULT_PROVIDER_IDS",
     "WorkerCatalog",
+    "NetworkPolicy",
+    "PrivacyMode",
+    "RoutingContext",
+    "ToolPolicy",
 ]
