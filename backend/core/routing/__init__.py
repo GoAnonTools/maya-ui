@@ -3,6 +3,7 @@
 from .catalog import DEFAULT_PROVIDER_IDS, WorkerCatalog
 from .context import NetworkPolicy, PrivacyMode, RoutingContext, ToolPolicy
 from .registry import WorkerCapabilityRegistry
+from .policy import RoutingPolicy, RoutingPolicyError
 from .models import (
     DelegationEvent,
     DelegationEventType,
@@ -28,4 +29,6 @@ __all__ = [
     "PrivacyMode",
     "RoutingContext",
     "ToolPolicy",
+    "RoutingPolicy",
+    "RoutingPolicyError",
 ]
