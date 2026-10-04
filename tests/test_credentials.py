@@ -29,12 +29,12 @@ class CredentialResolverTests(unittest.TestCase):
         self.assertEqual(resolver("maya.provider.ministral_14b.api_key"), "test-secret")
         self.assertEqual(wallet.references, ["maya.provider.ministral_14b.api_key"])
 
-    def test_provider_availability_uses_resolved_credential_and_newelle_stays_default(self):
+    def test_provider_availability_uses_resolved_credential_and_maya_core_stays_default(self):
         resolver = CredentialResolver({"kwallet": FakeWalletBackend("test-secret")})
         manager = create_default_provider_manager(credential_resolver=resolver)
 
         self.assertTrue(manager.availability("ministral_14b").available)
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
 
     def test_missing_wallet_credential_marks_provider_unavailable(self):
         resolver = CredentialResolver({"kwallet": FakeWalletBackend(None)})
@@ -45,7 +45,7 @@ class CredentialResolverTests(unittest.TestCase):
         self.assertEqual(status.reason, "credential is unavailable")
         with self.assertRaises(LLMProviderError):
             manager.select("ministral_14b")
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
 
     def test_invalid_reference_is_rejected_before_backend_call(self):
         wallet = FakeWalletBackend("secret")

@@ -202,7 +202,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertEqual(provider._endpoint(), "http://localhost:9000/v1/chat/completions")
         self.assertEqual(OpenAICompatibleProvider("http://host/api/v1/", "model")._endpoint(), "http://host/api/v1/chat/completions")
 
-    def test_registration_does_not_change_newelle_default(self):
+    def test_registration_does_not_change_maya_core_default(self):
         manager = create_default_provider_manager(credential_resolver=lambda _ref: None)
         provider = register_openai_compatible_provider(
             manager.registry,
@@ -212,10 +212,10 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             unavailable_reason="awaiting credentials",
         )
 
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
         self.assertEqual(manager.registry.get("openai_compatible"), provider)
         self.assertFalse(manager.availability("openai_compatible").available)
-        self.assertEqual(manager.provider_names, ("newelle", "ministral_14b", "openai_compatible"))
+        self.assertEqual(manager.provider_names, ("newelle", "maya_core", "ministral_14b", "openai_compatible"))
 
 
 if __name__ == "__main__":

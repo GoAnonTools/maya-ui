@@ -11,7 +11,6 @@ from PySide6.QtCore import QObject
 
 from .manager import ProviderManager
 from .newelle_provider import NewelleProvider
-from .maya_core_provider import MayaCoreProvider
 from .credentials import CredentialResolver as MayaCredentialResolver, create_default_credential_resolver
 from .openai_compatible_provider import CredentialResolver as CredentialLookup, OpenAICompatibleProvider
 from .registry import ProviderRegistry
@@ -25,15 +24,12 @@ def create_default_provider_manager(
     *,
     credential_resolver: CredentialLookup | None = None,
 ) -> ProviderManager:
-    """Register configured providers with Maya Core as the default."""
+    """Register configured providers while keeping Newelle as the default."""
     if credential_resolver is None:
         credential_resolver = create_default_credential_resolver()
     provider = NewelleProvider(parent)
     registry = ProviderRegistry()
     registry.register(provider)
-
-    maya_core_provider = MayaCoreProvider()
-    registry.register(maya_core_provider)
 
     for config in _load_provider_configs():
         if config.get("provider_type") != "openai_compatible":
@@ -52,14 +48,14 @@ def create_default_provider_manager(
             available=available,
             unavailable_reason=reason,
         )
-    return ProviderManager(registry, default_provider_name=maya_core_provider.name)
+    return ProviderManager(registry, default_provider_name=provider.name)
 
 
 def _load_provider_configs() -> list[dict]:
     try:
         config = json.loads(PROVIDER_CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        log.exception("Could not read Maya provider catalog; continuing with built-in providers")
+        log.exception("Could not read Maya provider catalog; continuing with Newelle only")
         return []
     if not isinstance(config, list):
         log.error("Maya provider catalog must contain a list")

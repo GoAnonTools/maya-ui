@@ -22,7 +22,7 @@ class MinistralProviderRegistrationTests(unittest.TestCase):
         lookup = {"maya.provider.ministral_14b.api_key": "test-secret"}
         manager = create_default_provider_manager(credential_resolver=lookup.get)
 
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
         self.assertIn("ministral_14b", manager.provider_names)
         status = manager.availability("ministral_14b")
         self.assertTrue(status.available)
@@ -45,13 +45,13 @@ class MinistralProviderRegistrationTests(unittest.TestCase):
     def test_missing_credential_marks_provider_unavailable_without_changing_default(self):
         manager = create_default_provider_manager(credential_resolver=lambda _ref: None)
 
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
         status = manager.availability("ministral_14b")
         self.assertFalse(status.available)
         self.assertEqual(status.reason, "credential is unavailable")
         with self.assertRaises(LLMProviderError):
             manager.select("ministral_14b")
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
 
     def test_unresolved_credential_marks_provider_unavailable(self):
         manager = create_default_provider_manager(credential_resolver=lambda _ref: None)

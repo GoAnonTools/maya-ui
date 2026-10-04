@@ -13,6 +13,7 @@ from backend.llm import (
 )
 from backend.llm.defaults import create_default_provider_manager
 from backend.llm.dev_provider_test import list_provider_status, run_provider_test
+from backend.llm.maya_core_provider import MayaCoreProvider
 from backend.llm.newelle_provider import NewelleProvider
 
 
@@ -33,19 +34,20 @@ class FakeProvider:
 
 
 class ProviderManagerTests(unittest.TestCase):
-    def test_default_provider_selection_uses_newelle(self):
+    def test_default_provider_selection_uses_maya_core(self):
         manager = create_default_provider_manager(credential_resolver=lambda _ref: None)
 
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
+        self.assertIsInstance(manager.registry.get("maya_core"), MayaCoreProvider)
         self.assertIsInstance(manager.registry.get("newelle"), NewelleProvider)
         self.assertTrue(manager.availability().available)
         self.assertTrue(manager.capabilities.streaming)
-        self.assertTrue(manager.capabilities.tool_calls)
+        self.assertFalse(manager.capabilities.tool_calls)
 
     def test_development_path_lists_and_selects_ministral_then_restores_default(self):
         manager = create_default_provider_manager(credential_resolver=lambda _ref: "test-secret")
 
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
         statuses = {name: available for name, available, _reason in list_provider_status(manager)}
         self.assertTrue(statuses["ministral_14b"])
         manager.select("ministral_14b")
@@ -173,7 +175,7 @@ class ProviderManagerTests(unittest.TestCase):
 
         self.assertEqual(received, (LLMTextDelta("Ministral "), LLMTextDelta("response"), LLMCompleted("stop")))
         self.assertEqual(controller._assistant_text, "Ministral response")
-        self.assertEqual(manager.current_provider_name, "newelle")
+        self.assertEqual(manager.current_provider_name, "maya_core")
 
 
 if __name__ == "__main__":
