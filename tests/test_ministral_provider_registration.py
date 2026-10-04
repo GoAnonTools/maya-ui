@@ -11,9 +11,9 @@ class MinistralProviderRegistrationTests(unittest.TestCase):
         entries = json.loads(PROVIDER_CONFIG_PATH.read_text(encoding="utf-8"))
         ministral = next(entry for entry in entries if entry["id"] == "ministral_14b")
 
-        self.assertEqual(ministral["friendly_name"], "Ministral 14B")
+        self.assertEqual(ministral["friendly_name"], "Ministral 8B")
         self.assertEqual(ministral["provider_type"], "openai_compatible")
-        self.assertEqual(ministral["model_name"], "ministral-14b-latest")
+        self.assertEqual(ministral["model_name"], "ministral-8b-2512")
         self.assertEqual(ministral["base_url"], "https://api.mistral.ai/v1")
         self.assertEqual(ministral["credential_ref"], "maya.provider.ministral_14b.api_key")
         self.assertFalse(any("key" in key.lower() and key != "credential_ref" for key in ministral))
@@ -26,11 +26,11 @@ class MinistralProviderRegistrationTests(unittest.TestCase):
         self.assertIn("ministral_14b", manager.provider_names)
         status = manager.availability("ministral_14b")
         self.assertTrue(status.available)
-        self.assertEqual(status.display_name, "Ministral 14B")
+        self.assertEqual(status.display_name, "Ministral 8B")
 
         provider = manager.registry.get("ministral_14b")
         self.assertIsInstance(provider, OpenAICompatibleProvider)
-        self.assertEqual(provider.model, "ministral-14b-latest")
+        self.assertEqual(provider.model, "ministral-8b-2512")
         self.assertEqual(provider.base_url, "https://api.mistral.ai/v1")
         self.assertEqual(provider.credential_ref, "maya.provider.ministral_14b.api_key")
         self.assertEqual(provider.capabilities.streaming, True)
@@ -38,7 +38,7 @@ class MinistralProviderRegistrationTests(unittest.TestCase):
 
         manager.select("ministral_14b")
         self.assertEqual(manager.current_provider_name, "ministral_14b")
-        self.assertEqual(manager.current_provider_display_name, "Ministral 14B")
+        self.assertEqual(manager.current_provider_display_name, "Ministral 8B")
         manager.select("newelle")
         self.assertEqual(manager.current_provider_name, "newelle")
 

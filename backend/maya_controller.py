@@ -8,10 +8,11 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Property, QThread, QTimer, Signal, Slot, Qt
 
 from .behaviour_policy import classify_intent, policy_instruction
+from .conversation import ConversationCoordinator
 from .core.maya_core_manager import MayaCoreLifecycleManager
 from .mcp_client import MCPStdioClient
 from .local_skills import local_skill_response
-from .llm import LLMConversation, LLMCompleted, LLMMessage, LLMRequest, LLMState, LLMTextDelta
+from .llm import LLMConversation, LLMCompleted, LLMMessage, LLMRequest, LLMSession, LLMState, LLMTextDelta
 from .llm.defaults import create_default_provider_manager
 from .llm.manager import ProviderManager
 from .llm.runner import LLMStreamWorker
@@ -121,6 +122,7 @@ class MayaController(QObject):
         self._user_text = ""
         self._assistant_text = ""
         self._chat_id = None
+        self._conversation_coordinator = ConversationCoordinator(conversation_id=self._chat_id)
         self._request_active = False
         self._generation = 0
         self._tts_generation = 0
@@ -363,6 +365,18 @@ class MayaController(QObject):
     def current_provider_display_name(self) -> str:
         """Friendly active provider label, delegated to ProviderManager."""
         return self._provider_manager.current_provider_display_name
+
+    def _get_conversation_coordinator(self) -> ConversationCoordinator:
+        """Return the coordinator, including for lightweight test instances."""
+        coordinator = getattr(self, "_conversation_coordinator", None)
+        if coordinator is None:
+            coordinator = ConversationCoordinator(conversation_id=getattr(self, "_chat_id", None))
+            self._conversation_coordinator = coordinator
+        return coordinator
+
+    def _get_maya_core_lifecycle(self):
+        """Return lifecycle integration when the full controller is initialized."""
+        return getattr(self, "_maya_core_lifecycle", None)
 
     @Slot(str, str)
     def set_state(self, state, detail=""):
@@ -635,7 +649,8 @@ class MayaController(QObject):
                 # Memory is optional: preserve the user's request if local storage fails.
                 log.exception("Memory retrieval failed; continuing without memory context")
 
-        prompt = build_prompt(behaviour, language_instruction, memory_context, user_text)
+        coordinator = self._get_conversation_coordinator()
+        prompt = coordinator.build_prompt(behaviour, language_instruction, memory_context, user_text)
         usage = self.estimate_context_usage(prompt)
         if usage.get("is_approaching_limit"):
             log.warning(
@@ -661,14 +676,15 @@ class MayaController(QObject):
         """Reset short-term context while preserving long-term memories and attaching recovery notice."""
         log.warning("CONTEXT_ROLLOVER resetting short-term chat context chat_id=%r", self._chat_id)
         self._chat_id = None
+        self._get_conversation_coordinator().reset_conversation()
         self._pending_recovery_notice = True
         return None
 
     def _start_provider_request(self, prompt, chat_id) -> bool:
         if self._llm_thread is not None and self._llm_thread.isRunning():
             return False
-        request = LLMRequest(
-            messages=(LLMMessage(role="user", content=prompt),),
+        request = self._get_conversation_coordinator().create_request(
+            prompt,
             conversation_id=chat_id,
         )
         thread = QThread(self)
@@ -707,10 +723,12 @@ class MayaController(QObject):
             log.debug("Ignoring stale LLM event after cancellation")
             return
         if isinstance(event, LLMConversation):
+            self._on_chat_ready(event.conversation_id)
+        elif isinstance(event, LLMSession):
             try:
-                self._on_chat_ready(int(event.conversation_id))
-            except (TypeError, ValueError):
-                log.warning("Ignoring invalid Newelle conversation ID: %r", event.conversation_id)
+                self._get_conversation_coordinator().set_session_id(event.session_id)
+            except ValueError:
+                log.warning("Ignoring invalid Maya session ID: %r", event.session_id)
         elif isinstance(event, LLMState):
             self.set_state(event.state, event.detail)
         elif isinstance(event, LLMTextDelta):
@@ -877,8 +895,9 @@ class MayaController(QObject):
 
     @Slot(int)
     def _on_chat_ready(self, chat_id):
-        log.warning("WAKE_DEBUG response LLM chat ready chat_id=%d", chat_id)
+        log.warning("WAKE_DEBUG response LLM chat ready chat_id=%r", chat_id)
         self._chat_id = chat_id
+        self._get_conversation_coordinator().set_conversation_id(chat_id)
 
     @Slot(str)
     def _on_assistant_text(self, text):
@@ -893,7 +912,9 @@ class MayaController(QObject):
         self._stop_llm_watchdog()
         log.warning("WAKE_DEBUG response LLM completed assistant_text=%r request_active=%s tts_response_active=%s tts_speaking=%s", self._assistant_text, self._request_active, self._tts.response_active, self._tts.is_speaking)
         self._request_active = False
-        self._maya_core_lifecycle.request_finished()
+        lifecycle = self._get_maya_core_lifecycle()
+        if lifecycle is not None:
+            lifecycle.request_finished()
         self._tts.finish_response()
         if not self._tts.is_speaking and not self._tts.response_active:
             self.set_state("idle")
@@ -907,9 +928,12 @@ class MayaController(QObject):
                 log.warning("REACTIVE_RECOVERY context overflow detected, performing context reset and retrying request chat_id=%r", self._chat_id)
                 self._is_overflow_retrying = True
                 self._chat_id = None
+                self._get_conversation_coordinator().reset_conversation()
                 self._pending_recovery_notice = True
                 self._request_active = False
-                self._maya_core_lifecycle.report_provider_failure()
+                lifecycle = self._get_maya_core_lifecycle()
+                if lifecycle is not None:
+                    lifecycle.report_provider_failure()
                 try:
                     self._submit_request(self._user_text, "", None, "en", "retry")
                 finally:
@@ -918,7 +942,9 @@ class MayaController(QObject):
 
         log.error("WAKE_DEBUG controller user-facing error detail retained friendly_label=%r", self._details["error"])
         self._request_active = False
-        self._maya_core_lifecycle.report_provider_failure()
+        lifecycle = self._get_maya_core_lifecycle()
+        if lifecycle is not None:
+            lifecycle.report_provider_failure()
         self._tts.stop()
         self.set_state("error", detail)
 

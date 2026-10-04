@@ -62,6 +62,7 @@ class LLMRequest:
     temperature: float | None = None
     max_tokens: int | None = None
     conversation_id: str | int | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,13 @@ class LLMConversation:
 
 
 @dataclass(frozen=True)
+class LLMSession:
+    """Client or server session identifier for a conversation."""
+
+    session_id: str
+
+
+@dataclass(frozen=True)
 class LLMState:
     """User-facing provider activity such as thinking or running a tool."""
 
@@ -114,6 +122,7 @@ LLMEvent: TypeAlias = (
     | LLMUsage
     | LLMCompleted
     | LLMConversation
+    | LLMSession
     | LLMState
 )
 

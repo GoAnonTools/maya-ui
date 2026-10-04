@@ -20,7 +20,7 @@ class ProviderSelectionTest(unittest.TestCase):
     def setUp(self):
         self.registry = ProviderRegistry()
         self.p1 = DummyProvider("newelle", "Newelle Local")
-        self.p2 = DummyProvider("ministral_14b", "Ministral 14B")
+        self.p2 = DummyProvider("ministral_14b", "Ministral 8B")
         self.registry.register(self.p1)
         self.registry.register(self.p2)
 
@@ -58,7 +58,7 @@ class ProviderSelectionTest(unittest.TestCase):
 
         self.assertTrue(signal_emitted)
         self.assertEqual(self.controller.currentProviderName, "ministral_14b")
-        self.assertEqual(self.controller.currentProviderDisplayName, "Ministral 14B")
+        self.assertEqual(self.controller.currentProviderDisplayName, "Ministral 8B")
 
     def test_select_unknown_provider_handled_safely(self):
         signal_emitted = False
