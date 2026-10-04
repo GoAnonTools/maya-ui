@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Property, QThread, QTimer, Signal, Slot, Qt
 
 from .behaviour_policy import classify_intent, policy_instruction
+from .core.maya_core_manager import MayaCoreLifecycleManager
 from .mcp_client import MCPStdioClient
 from .local_skills import local_skill_response
 from .llm import LLMConversation, LLMCompleted, LLMMessage, LLMRequest, LLMState, LLMTextDelta
@@ -150,6 +151,13 @@ class MayaController(QObject):
         self._llm_watchdog_timer.setSingleShot(True)
         self._llm_watchdog_timer.timeout.connect(self._on_llm_watchdog_timeout)
         self._provider_manager = provider_manager or create_default_provider_manager(self)
+        self._maya_core_lifecycle = MayaCoreLifecycleManager(
+            self._provider_manager,
+            parent=self,
+            is_request_active=lambda: self._request_active,
+        )
+        self._maya_core_lifecycle.providerChanged.connect(self.providerChanged.emit)
+        self._maya_core_lifecycle.availabilityChanged.connect(lambda _available: self.providerChanged.emit())
         self._mcp_client = mcp_client or MCPStdioClient()
         self._llm_thread = None
         self._llm_worker = None
@@ -502,6 +510,10 @@ class MayaController(QObject):
             self._stop_llm_watchdog()
         except Exception:
             log.exception("shutdown: LLM watchdog stop failed")
+        try:
+            self._maya_core_lifecycle.stop()
+        except Exception:
+            log.exception("shutdown: Maya Core lifecycle stop failed")
 
         self._request_active = False
         log.info("Maya shutdown complete")
@@ -881,6 +893,7 @@ class MayaController(QObject):
         self._stop_llm_watchdog()
         log.warning("WAKE_DEBUG response LLM completed assistant_text=%r request_active=%s tts_response_active=%s tts_speaking=%s", self._assistant_text, self._request_active, self._tts.response_active, self._tts.is_speaking)
         self._request_active = False
+        self._maya_core_lifecycle.request_finished()
         self._tts.finish_response()
         if not self._tts.is_speaking and not self._tts.response_active:
             self.set_state("idle")
@@ -896,6 +909,7 @@ class MayaController(QObject):
                 self._chat_id = None
                 self._pending_recovery_notice = True
                 self._request_active = False
+                self._maya_core_lifecycle.report_provider_failure()
                 try:
                     self._submit_request(self._user_text, "", None, "en", "retry")
                 finally:
@@ -904,6 +918,7 @@ class MayaController(QObject):
 
         log.error("WAKE_DEBUG controller user-facing error detail retained friendly_label=%r", self._details["error"])
         self._request_active = False
+        self._maya_core_lifecycle.report_provider_failure()
         self._tts.stop()
         self.set_state("error", detail)
 
