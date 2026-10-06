@@ -106,6 +106,7 @@ Window {
                     }
                 }
             }
+            DelegationPanel { Layout.fillWidth: true }
             InputBar {
                 id: composer
                 Layout.fillWidth: true

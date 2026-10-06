@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Property, QThread, QTimer, Signal, Slot, Qt
 
 from .behaviour_policy import classify_intent, policy_instruction
 from .conversation import ConversationCoordinator
+from .delegation_observability import DelegationObservabilityClient
 from .core.maya_core_manager import MayaCoreLifecycleManager
 from .mcp_client import MCPStdioClient
 from .local_skills import local_skill_response
@@ -66,6 +67,11 @@ class MayaController(QObject):
     userTextChanged = Signal()
     assistantTextChanged = Signal()
     providerChanged = Signal()
+    delegationStatusChanged = Signal()
+    delegationTimelineChanged = Signal()
+    delegationApprovalChanged = Signal()
+    delegationResultChanged = Signal()
+    delegationErrorChanged = Signal()
     _states = ("idle", "listening", "thinking", "speaking", "tool", "error")
     _details = {"idle": "", "listening": "", "thinking": "", "speaking": "", "tool": "", "error": "Something went wrong"}
 
@@ -89,6 +95,18 @@ class MayaController(QObject):
     currentProviderName = Property(str, _get_current_provider_name, notify=providerChanged)
     currentProviderDisplayName = Property(str, _get_current_provider_display_name, notify=providerChanged)
     availableProviders = Property(list, _get_available_providers, notify=providerChanged)
+
+    def _get_delegation_status(self): return self._delegation_observability.delegationStatus
+    def _get_delegation_timeline(self): return self._delegation_observability.delegationTimeline
+    def _get_delegation_approval(self): return self._delegation_observability.delegationApproval
+    def _get_delegation_result(self): return self._delegation_observability.delegationResult
+    def _get_delegation_error(self): return self._delegation_observability.delegationError
+
+    delegationStatus = Property(str, _get_delegation_status, notify=delegationStatusChanged)
+    delegationTimeline = Property(list, _get_delegation_timeline, notify=delegationTimelineChanged)
+    delegationApproval = Property('QVariantMap', _get_delegation_approval, notify=delegationApprovalChanged)
+    delegationResult = Property(str, _get_delegation_result, notify=delegationResultChanged)
+    delegationError = Property(str, _get_delegation_error, notify=delegationErrorChanged)
 
     @property
     def current_provider_name(self) -> str:
@@ -117,6 +135,12 @@ class MayaController(QObject):
 
     def __init__(self, memory_service=None, provider_manager: ProviderManager | None = None, mcp_client=None):
         super().__init__()
+        self._delegation_observability = DelegationObservabilityClient(parent=self)
+        self._delegation_observability.statusChanged.connect(self.delegationStatusChanged.emit)
+        self._delegation_observability.timelineChanged.connect(self.delegationTimelineChanged.emit)
+        self._delegation_observability.approvalChanged.connect(self.delegationApprovalChanged.emit)
+        self._delegation_observability.resultChanged.connect(self.delegationResultChanged.emit)
+        self._delegation_observability.errorChanged.connect(self.delegationErrorChanged.emit)
         self._state = "idle"
         self._detail = ""
         self._user_text = ""
@@ -404,6 +428,25 @@ class MayaController(QObject):
         self.detailChanged.emit()
         self._wake.set_mode(state)
 
+    @Slot(str)
+    def watch_delegation(self, delegation_id):
+        """Start read-only delegation observation from the full workspace."""
+        self._delegation_observability.watch(delegation_id)
+
+    @Slot()
+    def start_repository_analysis(self):
+        """Start the explicit read-only repository analysis delegation."""
+        self._delegation_observability.start_repository_analysis()
+
+    @Slot()
+    def approve_delegation(self):
+        """Grant a displayed Maya-owned approval request."""
+        self._delegation_observability.approve_delegation()
+
+    @Slot()
+    def stop_delegation_observability(self):
+        self._delegation_observability.stop()
+
     @Slot(object)
     def apply_message(self, message):
         """Apply one validated IPC object; bad external input never reaches QML."""
@@ -464,6 +507,7 @@ class MayaController(QObject):
           7. Cancel the wake timeout timer
         """
         log.info("Maya shutdown starting state=%s request_active=%s", self._state, self._request_active)
+        self._delegation_observability.stop()
 
         # 1. Cancel any in-flight LLM worker so its eventReady signals stop
         # arriving during teardown. runner.py's runCompleted signal already
